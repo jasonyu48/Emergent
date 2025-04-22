@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
-from pathlib import Path
 
 class ViTEncoder(nn.Module):
     """Vision Transformer Encoder for DotWall environment"""
@@ -113,28 +112,10 @@ class DynamicsModel(nn.Module):
         self.mlp = nn.Sequential(*layers)
     
     def forward(self, z_t, a_t):
-        """
-        Forward pass through the dynamics model
-        
-        Args:
-            z_t: Current latent state, shape [batch_size, encoding_dim]
-            a_t: Action, shape [batch_size, action_dim]
-            
-        Returns:
-            Predicted next latent state z_{t+1}
-        """
-        # Ensure input tensors have proper requires_grad setting
-        # z_t typically doesn't need gradients when searching for actions
-        # a_t needs gradients when searching for actions
-        
         # Concatenate encoded state and action
-        # Make sure they're on the same device and have the same dtype
-        if a_t.dtype != z_t.dtype:
-            a_t = a_t.to(dtype=z_t.dtype)
-            
         x = torch.cat([z_t, a_t], dim=-1)
         
-        # Apply MLP - this will maintain gradient flow if inputs require grad
+        # Apply MLP
         z_next = self.mlp(x)
         
         return z_next
@@ -230,72 +211,36 @@ class PLDMModel(nn.Module):
         """Predict next state given current encoded state and action"""
         return self.dynamics(z_t, a_t)
     
-    def search_action(self, z_t, z_target, num_steps=10, lr=1, verbose=False, max_step_norm=12.25):
+    def search_action(self, z_t, z_target, num_steps=10, lr=0.01):
         """Search for the action that leads from z_t to z_target"""
-        # Detach inputs but keep dtype and device
-        dtype = z_t.dtype
-        device = z_t.device
+        # Ensure inputs are detached to avoid computing unnecessary gradients
+        z_t = z_t.detach()
+        z_target = z_target.detach()
         
-        if verbose:
-            print(f"Starting action search with {num_steps} steps, lr={lr}")
-            print(f"z_t shape: {z_t.shape}, dtype: {dtype}")
-            print(f"z_target shape: {z_target.shape}, dtype: {dtype}")
+        # Create a directly trainable tensor for the action
+        # This is detached from any previous computation graph and requires grad
+        action = torch.zeros(z_t.shape[0], self.action_dim, 
+                             device=z_t.device, requires_grad=True)
         
-        # Initialize action from uniform distribution within the environment's action bounds
-        # The default value for max_step_norm in the DotWall environment is 12.25
-        action = torch.rand(z_t.shape[0], self.action_dim, device=device, dtype=torch.float32) 
-        action = action * 2 * max_step_norm - max_step_norm  # Scale to [-max_step_norm, max_step_norm]
+        # Use a standard optimizer
+        optimizer = torch.optim.Adam([action], lr=lr)
         
-        if verbose:
-            print(f"Initial action: {action.cpu().numpy()}, norm: {action.norm().item():.4f}")
-        
-        # We will implement manual optimization without using autograd
-        # This avoids gradient flow issues completely
-        z_t_float = z_t.detach().to(torch.float32)
-        z_target_float = z_target.detach().to(torch.float32)
-        
-        # Manual optimization loop
-        for i in range(num_steps):
-            # Forward pass using float32 precision
-            with torch.no_grad():  # Explicitly disable gradients
-                # Cast action to model dtype for forward pass
-                action_cast = action.to(dtype)
-                
-                # Predict next state
-                z_next_pred = self.dynamics(z_t_float.to(dtype), action_cast)
-                
-                # Compute loss
-                z_next_pred_float = z_next_pred.to(torch.float32)
-                loss = ((z_next_pred_float - z_target_float) ** 2).mean().item()
-                
-                # Estimate gradient using finite differences
-                # This is a simple but effective approximation for our purpose
-                grad = torch.zeros_like(action)
-                eps = 1e-4
-                
-                # Compute gradient for each dimension of the action
-                for j in range(self.action_dim):
-                    # Perturb action in positive direction
-                    action_pos = action.clone()
-                    action_pos[:, j] += eps
-                    action_pos_cast = action_pos.to(dtype)
-                    
-                    # Forward pass with perturbed action
-                    z_next_pos = self.dynamics(z_t_float.to(dtype), action_pos_cast)
-                    loss_pos = ((z_next_pos.to(torch.float32) - z_target_float) ** 2).mean().item()
-                    
-                    # Compute approximate gradient
-                    grad[:, j] = (loss_pos - loss) / eps
-                
-                # Update action (gradient descent step)
-                action = action - lr * grad
-                
-                # Optional: Print progress
-                if verbose:
-                    print(f"  Action search step {i}, Loss: {loss:.6f}, Action: {action.cpu().numpy()}")
-        
-        if verbose:
-            print(f"Final action: {action.cpu().numpy()}, Final loss: {loss:.6f}")
+        # Optimization loop
+        for _ in range(num_steps):
+            # Clear gradients
+            optimizer.zero_grad()
             
-        # Cast final action to the model's dtype before returning
-        return action.to(dtype).detach() 
+            # Forward pass through dynamics model
+            z_next_pred = self.dynamics(z_t, action)
+            
+            # Compute loss
+            loss = F.mse_loss(z_next_pred, z_target)
+            
+            # Backward pass
+            loss.backward()
+            
+            # Update action
+            optimizer.step()
+        
+        # Return optimized action (detached to prevent further gradient computation)
+        return action.detach() 

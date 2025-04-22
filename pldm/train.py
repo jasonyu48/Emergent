@@ -578,7 +578,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     
     # Calculate reward
     distance_reward = -distance  # Negative distance as reward
-    same_room_bonus = torch.where(same_room, torch.tensor(100.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
+    same_room_bonus = torch.where(same_room, torch.tensor(1000.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
     return distance_reward + same_room_bonus
 
@@ -622,7 +622,7 @@ def compute_advantages(rewards, values, gamma=0.99, lambda_=0.95):
     return advantages
 
 
-def rollout(model, env, max_steps=100, search_steps=10, device='cpu', bf16=False):
+def rollout(model, env, max_steps=100, search_steps=10, device='cpu'):
     """Perform a single rollout in the environment using the PLDM model"""
     # Reset environment
     obs, info = env.reset()
@@ -637,16 +637,13 @@ def rollout(model, env, max_steps=100, search_steps=10, device='cpu', bf16=False
     # Ensure model is in evaluation mode during rollout
     model.eval()
     
-    # Get dtype based on bf16 setting
-    dtype = torch.bfloat16 if bf16 else torch.float32
-    
     # Get initial encoding
     with torch.no_grad():
         # Convert observation to tensor properly
         if isinstance(obs, torch.Tensor):
-            obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+            obs_tensor = obs.float().unsqueeze(0).to(device)
         else:
-            obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+            obs_tensor = torch.from_numpy(obs).float().unsqueeze(0).to(device)
         
         # Encode current observation
         z_t = model.encode(obs_tensor)
@@ -666,26 +663,11 @@ def rollout(model, env, max_steps=100, search_steps=10, device='cpu', bf16=False
                 next_goals.append(z_next.cpu())
                 log_probs.append(log_prob.item())
             
-            # Action search needs z_t and z_next to be detached
-            z_t_detached = z_t.clone().detach()
-            z_next_detached = z_next.clone().detach()
-            
-            # Search for action using detached tensors
-            try:
-                a_t = model.search_action(
-                    z_t_detached, 
-                    z_next_detached, 
-                    num_steps=search_steps
-                )
-            except Exception as e:
-                print(f"Error in search_action: {e}")
-                # Fallback to a random action if search fails
-                a_t = torch.randn(z_t.shape[0], model.action_dim, device=device).to(dtype)
-                print("Using fallback random action")
+            # Search for action to reach predicted next goal
+            a_t = model.search_action(z_t, z_next, num_steps=search_steps)
             
             # Take action in environment
-            # Convert to float32 before converting to NumPy since NumPy doesn't support bfloat16
-            action = a_t.to(torch.float32).cpu().numpy()[0]
+            action = a_t.cpu().numpy()[0]
             obs, reward, done, truncated, info = env.step(action)
             
             # Store information
@@ -697,9 +679,9 @@ def rollout(model, env, max_steps=100, search_steps=10, device='cpu', bf16=False
             with torch.no_grad():
                 # Convert observation to tensor
                 if isinstance(obs, torch.Tensor):
-                    obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+                    obs_tensor = obs.float().unsqueeze(0).to(device)
                 else:
-                    obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+                    obs_tensor = torch.from_numpy(obs).float().unsqueeze(0).to(device)
                 
                 # Encode next observation
                 z_t = model.encode(obs_tensor)
@@ -707,33 +689,10 @@ def rollout(model, env, max_steps=100, search_steps=10, device='cpu', bf16=False
         except Exception as e:
             print(f"Error during rollout at step {step}: {str(e)}")
             # Print more detailed information for debugging
-            print(f"z_t shape: {z_t.shape}, dtype: {z_t.dtype}, requires_grad: {z_t.requires_grad}")
+            print(f"z_t shape: {z_t.shape}, requires_grad: {z_t.requires_grad}")
             if 'z_next' in locals():
-                print(f"z_next shape: {z_next.shape}, dtype: {z_next.dtype}, requires_grad: {z_next.requires_grad}")
-            if 'a_t' in locals():
-                print(f"a_t shape: {a_t.shape}, dtype: {a_t.dtype}")
-            # Don't stop the training - allow fallback to continue
-            # use a random action instead
-            a_t = torch.randn(z_t.shape[0], model.action_dim, device=device).to(dtype)
-            # Convert to float32 before converting to NumPy
-            action = a_t.to(torch.float32).cpu().numpy()[0]
-            
-            try:
-                obs, reward, done, truncated, info = env.step(action)
-                states.append(obs)
-                actions.append(action)
-                rewards.append(reward)
-                
-                # Update current encoding
-                with torch.no_grad():
-                    if isinstance(obs, torch.Tensor):
-                        obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
-                    else:
-                        obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
-                    z_t = model.encode(obs_tensor)
-            except Exception as nested_e:
-                print(f"Failed to recover with random action: {nested_e}")
-                break
+                print(f"z_next shape: {z_next.shape}, requires_grad: {z_next.requires_grad}")
+            raise
     
     # Set model back to training mode
     model.train()
@@ -797,30 +756,8 @@ def train_pldm(args):
     # Set up device
     device = torch.device(args.device)
     
-    # Check if bf16 is supported on the current device
-    bf16_supported = (
-        args.bf16 and
-        torch.cuda.is_available() and
-        torch.cuda.is_bf16_supported()
-    )
-    
-    if args.bf16 and not bf16_supported:
-        print("Warning: BF16 precision requested but not supported on this device. Using FP32 instead.")
-    
-    if bf16_supported:
-        print("Using BFloat16 mixed precision training")
-        # Optional: enable autocast globally
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-    
-    # Function to convert tensor to bf16 if enabled
-    def maybe_cast_bf16(x):
-        if bf16_supported and isinstance(x, torch.Tensor):
-            return x.to(torch.bfloat16)
-        return x
-    
     # Create environment
-    env = DotWall(max_step_norm=args.max_step_norm)
+    env = DotWall()
     
     # Create model
     model = PLDMModel(
@@ -831,10 +768,6 @@ def train_pldm(args):
         hidden_dim=args.hidden_dim
     ).to(device)
     
-    # Convert model to bf16 if supported
-    if bf16_supported:
-        model = model.to(torch.bfloat16)
-    
     # Set model to training mode
     model.train()
     
@@ -843,24 +776,15 @@ def train_pldm(args):
         {'params': model.encoder.parameters(), 'lr': args.encoder_lr}
     ])
     
-    dynamics_optimizer = optim.Adam([
-        {'params': model.dynamics.parameters(), 'lr': args.dynamics_lr}
-    ])
-    
-    policy_optimizer = optim.Adam([
+    other_optimizer = optim.Adam([
+        {'params': model.dynamics.parameters(), 'lr': args.dynamics_lr},
         {'params': model.next_goal_predictor.parameters(), 'lr': args.policy_lr}
     ])
     
-    # Create learning rate scheduler for encoder
-    # Reduces learning rate to 1/3 every epoch (changed from every 2 epochs)
+    # Create learning rate scheduler for encoder only
+    # Reduces learning rate to 1/3 every 2 epochs
     encoder_scheduler = torch.optim.lr_scheduler.StepLR(
-        encoder_optimizer, step_size=1, gamma=1/3
-    )
-    
-    # Create learning rate scheduler for dynamics model
-    # Reduces learning rate by a factor of 2 every epoch
-    dynamics_scheduler = torch.optim.lr_scheduler.StepLR(
-        dynamics_optimizer, step_size=1, gamma=0.5  # 0.5 = 1/2
+        encoder_optimizer, step_size=2, gamma=1/3
     )
     
     # Check if resume from checkpoint
@@ -880,18 +804,11 @@ def train_pldm(args):
         if 'optimizer_state_dict' in checkpoint:
             # Old checkpoint format with single optimizer
             print("Detected old checkpoint format with single optimizer. Initializing new optimizers.")
-        elif 'dynamics_optimizer_state_dict' in checkpoint:
-            # New checkpoint format with separate optimizers and schedulers
-            encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer_state_dict'])
-            dynamics_optimizer.load_state_dict(checkpoint['dynamics_optimizer_state_dict'])
-            policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state_dict'])
-            encoder_scheduler.load_state_dict(checkpoint['encoder_scheduler_state_dict'])
-            dynamics_scheduler.load_state_dict(checkpoint['dynamics_scheduler_state_dict'])
         else:
-            # Intermediate checkpoint format
+            # New checkpoint format with separate optimizers
             encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer_state_dict'])
-            # Split the old other_optimizer parameters
-            print("Loading from intermediate checkpoint format. Initializing dynamics and policy optimizers.")
+            other_optimizer.load_state_dict(checkpoint['other_optimizer_state_dict'])
+            encoder_scheduler.load_state_dict(checkpoint['encoder_scheduler_state_dict'])
             
         start_epoch = checkpoint['epoch'] + 1
         global_step = checkpoint.get('global_step', 0)
@@ -911,8 +828,8 @@ def train_pldm(args):
         
         # Log current learning rates
         current_encoder_lr = encoder_optimizer.param_groups[0]['lr']
-        current_dynamics_lr = dynamics_optimizer.param_groups[0]['lr']
-        current_policy_lr = policy_optimizer.param_groups[0]['lr']
+        current_dynamics_lr = other_optimizer.param_groups[0]['lr']
+        current_policy_lr = other_optimizer.param_groups[1]['lr']
         
         print(f"Epoch {epoch+1}/{args.epochs} - Learning rates: Encoder={current_encoder_lr:.2e}, "
               f"Dynamics={current_dynamics_lr:.2e}, Policy={current_policy_lr:.2e}")
@@ -921,178 +838,97 @@ def train_pldm(args):
         writer.add_scalar('LearningRate/dynamics', current_dynamics_lr, epoch)
         writer.add_scalar('LearningRate/policy', current_policy_lr, epoch)
         
-        # Process episodes in batches
-        progress_bar = tqdm(total=args.episodes_per_epoch, desc=f"Epoch {epoch+1}/{args.epochs}")
-        episode_idx = 0
-        
-        while episode_idx < args.episodes_per_epoch:
-            # Initialize batch data storage
-            batch_states = []
-            batch_next_states = []
-            batch_actions = []
-            batch_log_probs = []
-            batch_returns = []
-            batch_rewards = []
-            
-            # Collect batch_size trajectories (or whatever remains in the epoch)
-            batch_size = min(args.batch_size, args.episodes_per_epoch - episode_idx)
-            valid_episodes = 0
-            
-            for _ in range(batch_size):
-                try:
-                    # Perform rollout
-                    trajectory = rollout(
-                        model, 
-                        env, 
-                        max_steps=args.max_steps_per_episode,
-                        search_steps=args.search_steps,
-                        device=device,
-                        bf16=bf16_supported
-                    )
-                    
-                    states = trajectory['states']
-                    actions = trajectory['actions']
-                    log_probs = trajectory['log_probs']
-                    
-                    # Skip empty trajectories
-                    if len(states) <= 1 or len(log_probs) == 0:
-                        progress_bar.update(1)
-                        episode_idx += 1
-                        continue
-                    
-                    # Calculate rewards based on distances
-                    rewards = calculate_custom_reward(states, env)
-                    episode_reward = sum(rewards)
-                    total_reward += episode_reward
-                    
-                    # Calculate returns for this episode
-                    returns = compute_returns(rewards, gamma=args.gamma)
-                    
-                    # Convert data to tensors
-                    states_tensor = []
-                    for s in states[:-1]:  # All states except the last one
-                        if isinstance(s, torch.Tensor):
-                            s_tensor = s.to(device=device)
-                        else:
-                            s_tensor = torch.tensor(s, device=device)
-                        
-                        if bf16_supported:
-                            s_tensor = s_tensor.to(torch.bfloat16)
-                        else:
-                            s_tensor = s_tensor.float()
-                        
-                        states_tensor.append(s_tensor)
-                    
-                    next_states_tensor = []
-                    for s in states[1:]:  # All states except the first one
-                        if isinstance(s, torch.Tensor):
-                            s_tensor = s.to(device=device)
-                        else:
-                            s_tensor = torch.tensor(s, device=device)
-                        
-                        if bf16_supported:
-                            s_tensor = s_tensor.to(torch.bfloat16)
-                        else:
-                            s_tensor = s_tensor.float()
-                        
-                        next_states_tensor.append(s_tensor)
-                    
-                    actions_tensor = []
-                    for a in actions:
-                        if isinstance(a, torch.Tensor):
-                            a_tensor = a.to(device=device)
-                        else:
-                            a_tensor = torch.tensor(a, device=device)
-                        
-                        # Convert actions to the appropriate dtype to match model
-                        if bf16_supported:
-                            a_tensor = a_tensor.to(torch.bfloat16)
-                        else:
-                            a_tensor = a_tensor.float()
-                            
-                        actions_tensor.append(a_tensor)
-                    
-                    # Add to batch data
-                    batch_states.extend(states_tensor)
-                    batch_next_states.extend(next_states_tensor)
-                    batch_actions.extend(actions_tensor)
-                    batch_log_probs.extend(log_probs)
-                    batch_returns.extend(returns.tolist())
-                    batch_rewards.append(episode_reward)
-                    
-                    valid_episodes += 1
-                    num_episodes += 1
-                    
-                    # Log individual episode metrics
-                    writer.add_scalar('Reward/individual_episode', episode_reward, global_step + episode_idx)
+        for episode in tqdm(range(args.episodes_per_epoch), desc=f"Epoch {epoch+1}/{args.epochs}"):
+            try:
+                # Perform rollout
+                trajectory = rollout(
+                    model, 
+                    env, 
+                    max_steps=args.max_steps_per_episode,
+                    search_steps=args.search_steps,
+                    device=device
+                )
                 
-                except Exception as e:
-                    print(f"Error during episode {episode_idx}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
+                num_episodes += 1
+                states = trajectory['states']
+                actions = trajectory['actions']
+                log_probs = trajectory['log_probs']
+                next_goals = trajectory['next_goals']
                 
-                # Update progress and counter
-                progress_bar.update(1)
-                episode_idx += 1
-            
-            # Skip update if no valid episodes
-            if valid_episodes == 0:
-                continue
-            
-            # Convert batch data to tensors - ensure dtype consistency
-            dtype = torch.bfloat16 if bf16_supported else torch.float32
-            batch_log_probs_tensor = torch.tensor(batch_log_probs, dtype=torch.float32, device=device)
-            batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
-            
-            # Reset gradients for both optimizers
-            encoder_optimizer.zero_grad()
-            dynamics_optimizer.zero_grad()
-            policy_optimizer.zero_grad()
-            
-            # Use autocast for mixed precision training if bf16 is enabled
-            with torch.autocast(device_type=device.type, dtype=dtype, enabled=bf16_supported):
+                # Calculate custom rewards based on distances
+                rewards = calculate_custom_reward(states, env)
+                total_reward += sum(rewards)
+                
+                # Convert states and actions to tensors
+                states_tensor = []
+                for s in states:
+                    if isinstance(s, torch.Tensor):
+                        states_tensor.append(s.float().to(device))
+                    else:
+                        states_tensor.append(torch.from_numpy(s).float().to(device))
+                
+                actions_tensor = []
+                for a in actions:
+                    if isinstance(a, torch.Tensor):
+                        actions_tensor.append(a.float().to(device))
+                    else:
+                        actions_tensor.append(torch.from_numpy(a).float().to(device))
+                
+                # Calculate returns
+                returns = compute_returns(rewards, gamma=args.gamma).to(device)
+                
+                # Convert log_probs to tensor
+                log_probs_tensor = torch.tensor(log_probs, dtype=torch.float32).to(device)
+                
+                # Reset gradients for both optimizers
+                encoder_optimizer.zero_grad()
+                other_optimizer.zero_grad()
+                
                 # Policy loss (policy gradient)
-                policy_loss = -(batch_log_probs_tensor * batch_returns_tensor).mean()
+                policy_loss = -(log_probs_tensor * returns).mean()
                 
                 # Dynamics loss (JEPA objective)
                 dynamics_loss = 0
-                for state, next_state, action in zip(batch_states, batch_next_states, batch_actions):
+                for i in range(len(states) - 1):
                     # Encode current and next state
-                    z_t = model.encode(state.unsqueeze(0))
-                    z_next_actual = model.encode(next_state.unsqueeze(0))
+                    z_t = model.encode(states_tensor[i].unsqueeze(0))
+                    z_next_actual = model.encode(states_tensor[i+1].unsqueeze(0))
                     
                     # Predict next state using dynamics model directly
-                    a_t = action.unsqueeze(0)
+                    a_t = actions_tensor[i].unsqueeze(0)
                     z_next_pred = model.dynamics(z_t, a_t)
                     
                     # Add to dynamics loss
                     dynamics_loss += F.mse_loss(z_next_pred, z_next_actual)
                 
-                if len(batch_states) > 0:
-                    dynamics_loss = dynamics_loss / len(batch_states)
+                if len(states) > 1:
+                    dynamics_loss = dynamics_loss / (len(states) - 1)
                 
                 # Total loss
                 loss = policy_loss + args.lambda_dynamics * dynamics_loss
-            
-            # Backward pass and optimize
-            loss.backward()
-            encoder_optimizer.step()
-            dynamics_optimizer.step()
-            policy_optimizer.step()
-            
-            # Update statistics
-            total_policy_loss += policy_loss.item() * valid_episodes
-            total_dynamics_loss += dynamics_loss.item() * valid_episodes
-            
-            # Log batch metrics
-            writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
-            writer.add_scalar('Loss/dynamics', dynamics_loss.item(), global_step)
-            writer.add_scalar('Loss/total', loss.item(), global_step)
-            writer.add_scalar('Reward/batch_mean', sum(batch_rewards)/len(batch_rewards), global_step)
-            
-            global_step += 1
-        
-        progress_bar.close()
+                
+                # Backward pass and optimize
+                loss.backward()
+                encoder_optimizer.step()
+                other_optimizer.step()
+                
+                # Update statistics
+                total_policy_loss += policy_loss.item()
+                total_dynamics_loss += dynamics_loss.item()
+                
+                global_step += 1
+                
+                # Log to tensorboard
+                writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
+                writer.add_scalar('Loss/dynamics', dynamics_loss.item(), global_step)
+                writer.add_scalar('Loss/total', loss.item(), global_step)
+                writer.add_scalar('Reward/episode', sum(rewards), global_step)
+                
+            except Exception as e:
+                print(f"Error during episode {episode}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                continue
                 
         # Epoch statistics
         if num_episodes > 0:
@@ -1115,18 +951,13 @@ def train_pldm(args):
         # Step the encoder learning rate scheduler at the end of each epoch
         encoder_scheduler.step()
         
-        # Step the dynamics learning rate scheduler at the end of each epoch
-        dynamics_scheduler.step()
-        
         # Save checkpoint
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'encoder_optimizer_state_dict': encoder_optimizer.state_dict(),
-            'dynamics_optimizer_state_dict': dynamics_optimizer.state_dict(),
-            'policy_optimizer_state_dict': policy_optimizer.state_dict(),
+            'other_optimizer_state_dict': other_optimizer.state_dict(),
             'encoder_scheduler_state_dict': encoder_scheduler.state_dict(),
-            'dynamics_scheduler_state_dict': dynamics_scheduler.state_dict(),
             'best_reward': best_reward,
             'global_step': global_step
         }, output_dir / 'checkpoint.pt')
@@ -1145,22 +976,17 @@ def parse_args():
     parser.add_argument('--hidden_dim', type=int, default=256, help='Dimension of hidden layers')
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=8, help='Number of training epochs')
-    parser.add_argument('--episodes_per_epoch', type=int, default=128, help='Number of episodes per epoch')
-    parser.add_argument('--batch_size', type=int, default=8, help='Number of trajectories to process in a batch')
-    parser.add_argument('--max_steps_per_episode', type=int, default=50, help='Maximum steps per episode')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
+    parser.add_argument('--episodes_per_epoch', type=int, default=100, help='Number of episodes per epoch')
+    parser.add_argument('--max_steps_per_episode', type=int, default=100, help='Maximum steps per episode')
     parser.add_argument('--search_steps', type=int, default=10, help='Number of steps for action search')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lambda_dynamics', type=float, default=0.3, help='Weight for dynamics loss')
-    parser.add_argument('--max_step_norm', type=float, default=12.25, help='Maximum step norm (5x original 2.45)')
+    parser.add_argument('--lambda_dynamics', type=float, default=1.0, help='Weight for dynamics loss')
     
     # Optimizer parameters
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e-3, help='Learning rate for dynamics model')
     parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
-    
-    # Precision parameters
-    parser.add_argument('--bf16', type=bool, default=True, help='Use BFloat16 mixed precision for training')
     
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 

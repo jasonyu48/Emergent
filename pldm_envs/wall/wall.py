@@ -26,7 +26,7 @@ class DotWall(gym.Env):
         level: str = "medium",
         n_steps: int = 200,
         action_step_mean: float = 1.0,
-        max_step_norm: float = 12.25,
+        max_step_norm: float = 2.45,
         device: Optional[torch.device] = None,
         fix_wall_location: Optional[int] = 32,
         fix_door_location: Optional[int] = 10,
