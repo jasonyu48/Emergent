@@ -144,7 +144,7 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
-    parser.add_argument('--model_path', type=str, default='output3/checkpoint.pt', help='Path to trained model')
+    parser.add_argument('--model_path', type=str, default='output3/best_model.pt', help='Path to trained model')
     parser.add_argument('--output_dir', type=str, default='test_output4', help='Directory to save test results')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
@@ -213,9 +213,9 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
     model = PLDMModel(
         img_size=env.img_size,
         in_channels=3,
-        encoding_dim=64,  # Updated to match training default
+        encoding_dim=32,  # Updated to match training default
         action_dim=2,
-        hidden_dim=128    # Updated to match training default
+        hidden_dim=256    # Updated to match training default
     ).to(device)
     
     # Load state dict

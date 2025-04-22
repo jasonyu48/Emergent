@@ -1,0 +1,643 @@
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c013 PLDM]$ python pldm/train.py
+Using BFloat16 mixed precision training
+/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+Epoch 1/100 - Learning rates: Encoder=1.00e-04, Dynamics=5.00e-04, Policy=1.00e-03
+Epoch 1/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 1/100 - Avg Reward: -348.5566, Avg Policy Loss: -0.0040, Avg Dynamics Loss: 0.8046
+Epoch 2/100 - Learning rates: Encoder=3.33e-05, Dynamics=2.50e-04, Policy=1.00e-03
+Epoch 2/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:31<00:00,  2.59s/it]
+Epoch 2/100 - Avg Reward: 198.3185, Avg Policy Loss: 0.0447, Avg Dynamics Loss: 0.4566
+Epoch 3/100 - Learning rates: Encoder=1.11e-05, Dynamics=1.25e-04, Policy=1.00e-03
+Epoch 3/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:52<00:00,  2.76s/it]
+Epoch 3/100 - Avg Reward: -202.1093, Avg Policy Loss: -0.0396, Avg Dynamics Loss: 0.3280
+Epoch 4/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 4/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 4/100 - Avg Reward: 144.1022, Avg Policy Loss: -0.0511, Avg Dynamics Loss: 0.2849
+Epoch 5/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 5/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [06:11<00:00,  2.90s/it]
+Epoch 5/100 - Avg Reward: -563.9785, Avg Policy Loss: 0.0438, Avg Dynamics Loss: 0.2732
+Epoch 6/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 6/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 6/100 - Avg Reward: -892.6773, Avg Policy Loss: 0.0738, Avg Dynamics Loss: 0.2620
+Epoch 7/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 7/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.57s/it]
+Epoch 7/100 - Avg Reward: 200.7111, Avg Policy Loss: -0.0499, Avg Dynamics Loss: 0.2514
+Epoch 8/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 8/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:50<00:00,  2.74s/it]
+Epoch 8/100 - Avg Reward: -264.5647, Avg Policy Loss: 0.0261, Avg Dynamics Loss: 0.2431
+Epoch 9/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 9/100: 100%|██████████████████████████████████████████████████████████████████| 128/128 [05:51<00:00,  2.74s/it]
+Epoch 9/100 - Avg Reward: -324.2244, Avg Policy Loss: 0.0053, Avg Dynamics Loss: 0.2371
+Epoch 10/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 10/100: 100%|█████████████████████████████████████████████████████████████████| 128/128 [05:55<00:00,  2.77s/it]
+Epoch 10/100 - Avg Reward: -256.0790, Avg Policy Loss: -0.0779, Avg Dynamics Loss: 0.2303
+Epoch 11/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 11/100: 100%|█████████████████████████████████████████████████████████████████| 128/128 [05:52<00:00,  2.75s/it]
+Epoch 11/100 - Avg Reward: -291.0450, Avg Policy Loss: 0.1006, Avg Dynamics Loss: 0.2212
+Epoch 12/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 12/100: 100%|█████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 12/100 - Avg Reward: -569.6294, Avg Policy Loss: -0.0791, Avg Dynamics Loss: 0.2150
+Epoch 13/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 13/100: 100%|█████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 13/100 - Avg Reward: -446.3787, Avg Policy Loss: 0.0677, Avg Dynamics Loss: 0.2130
+Epoch 14/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 14/100: 100%|█████████████████████████████████████████████████████████████████| 128/128 [05:23<00:00,  2.53s/it]
+Epoch 14/100 - Avg Reward: -361.8789, Avg Policy Loss: 0.0560, Avg Dynamics Loss: 0.2068
+Epoch 15/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 15/100:  23%|████████████████████▏                                                                    | 29/128 [00:58<03:20,  2.03s/it]^CTraceback (most recent call last):
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 1201, in <module>
+    train_pldm(args)
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 956, in train_pldm
+    trajectory = rollout(
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 689, in rollout
+    a_t = model.search_action(
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/model.py", line 265, in search_action
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/model.py", line 138, in forward
+    z_next = self.mlp(x)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/container.py", line 250, in forward
+    input = module(input)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/activation.py", line 133, in forward
+    return F.relu(input, inplace=self.inplace)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/functional.py", line 1704, in relu
+    result = torch.relu(input)
+KeyboardInterrupt
+Epoch 15/100:  23%|████████████████████▏                                                                    | 29/128 [00:58<03:18,  2.01s/it]
+
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c013 PLDM]$ exit
+exit
+srun: error: c013: task 0: Exited with exit code 130
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@dsailogin PLDM]$ srun --partition=a100 --time=20:00:00 --gres=gpu:1 --cpus-per-task=4 --mem=32G 
+--pty bash
+srun: job 233108 queued and waiting for resources
+srun: job 233108 has been allocated resources
+(base) [jyu197@c015 PLDM]$ conda activate ap
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ python pldm/train.py
+Traceback (most recent call last):
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 28, in <module>
+    from pldm.logger import Logger, MetricTracker
+ModuleNotFoundError: No module named 'pldm'
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ export export PYTHONPATH=$PWD:$PYTHONPATH
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ WANDB_MODE=offline
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ export PYTHONPATH=$PWD:$PYTHONPATH
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ python pldm/train.py
+Using BFloat16 mixed precision training
+/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+Epoch 1/100 - Learning rates: Encoder=1.00e-04, Dynamics=5.00e-04, Policy=5.00e-04
+Epoch 1/100: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:32<00:00,  2.60s/it]
+Epoch 1/100 - Avg Reward: -550.8881, Avg Policy Loss: -0.0036, Avg Dynamics Loss: 0.9711
+Epoch 2/100 - Learning rates: Encoder=3.33e-05, Dynamics=2.50e-04, Policy=5.00e-04
+Epoch 2/100: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:33<00:00,  2.61s/it]
+Epoch 2/100 - Avg Reward: -607.9392, Avg Policy Loss: -0.1187, Avg Dynamics Loss: 0.8298
+Epoch 3/100 - Learning rates: Encoder=1.11e-05, Dynamics=1.25e-04, Policy=5.00e-04
+Epoch 3/100:   6%|█████▋                                                                                     | 8/128 [00:16<04:07,  2.06s/it]^CTraceback (most recent call last):
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 1201, in <module>
+    train_pldm(args)
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 956, in train_pldm
+    trajectory = rollout(
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 689, in rollout
+    a_t = model.search_action(
+  File "/scratch/tshu2/jyu197/PLDM/pldm/model.py", line 284, in search_action
+    loss_pos = ((z_next_pos.to(torch.float32) - z_target_float) ** 2).mean().item()
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/_tensor.py", line 39, in wrapped
+    return f(*args, **kwargs)
+KeyboardInterrupt
+Epoch 3/100:   6%|█████▋                                                                                     | 8/128 [00:16<04:10,  2.09s/it]
+
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ python pldm/train.py
+Using BFloat16 mixed precision training
+/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+Epoch 1/100 - Learning rates: Encoder=1.00e-04, Dynamics=5.00e-04, Policy=1.00e-03
+Epoch 1/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:32<00:00,  2.60s/it]
+Epoch 1/100 - Avg Reward: -621.6076, Avg Policy Loss: 0.0675, Avg Dynamics Loss: 0.9037
+Epoch 2/100 - Learning rates: Encoder=3.33e-05, Dynamics=2.50e-04, Policy=1.00e-03
+Epoch 2/100:  20%|██████████████████████████████████▍                                                                                                                                             | 25/128 [00:51<03:31,  2.05s/it]^CTraceback (most recent call last):
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 1201, in <module>
+    train_pldm(args)
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 956, in train_pldm
+    trajectory = rollout(
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 689, in rollout
+    a_t = model.search_action(
+  File "/scratch/tshu2/jyu197/PLDM/pldm/model.py", line 283, in search_action
+    z_next_pos = self.dynamics(z_t_float.to(dtype), action_pos_cast)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/PLDM/pldm/model.py", line 138, in forward
+    z_next = self.mlp(x)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/container.py", line 250, in forward
+    input = module(input)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/modules/activation.py", line 133, in forward
+    return F.relu(input, inplace=self.inplace)
+  File "/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/nn/functional.py", line 1704, in relu
+    result = torch.relu(input)
+KeyboardInterrupt
+Epoch 2/100:  20%|██████████████████████████████████▍                                                                                                                                             | 25/128 [00:53<03:38,  2.12s/it]
+
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ python pldm/train.py
+Using BFloat16 mixed precision training
+/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+Epoch 1/100 - Learning rates: Encoder=1.00e-04, Dynamics=5.00e-04, Policy=1.00e-03
+Epoch 1/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.53s/it]
+Epoch 1/100 - Avg Reward: -539.5349, Avg Policy Loss: -0.0898, Avg Dynamics Loss: 0.8977
+Epoch 2/100 - Learning rates: Encoder=3.33e-05, Dynamics=2.50e-04, Policy=1.00e-03
+Epoch 2/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 2/100 - Avg Reward: -731.2243, Avg Policy Loss: 0.0179, Avg Dynamics Loss: 0.5957
+Epoch 3/100 - Learning rates: Encoder=1.11e-05, Dynamics=1.25e-04, Policy=1.00e-03
+Epoch 3/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.55s/it]
+Epoch 3/100 - Avg Reward: -1089.7648, Avg Policy Loss: 0.0368, Avg Dynamics Loss: 0.4560
+Epoch 4/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 4/100:  42%|██████████████████████████████████████████████████████████████████████████▎                                                                                                     | 54/128 [02:06<02:29,  2.02s/it]^CTraceback (most recent call last):
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 1201, in <module>
+    train_pldm(args)
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 956, in train_pldm
+    trajectory = rollout(
+  File "/weka/scratch/tshu2/jyu197/PLDM/pldm/train.py", line 689, in rollout
+    a_t = model.search_action(
+  File "/scratch/tshu2/jyu197/PLDM/pldm/model.py", line 283, in search_action
+    z_next_pos = self.dynamics(z_t_float.to(dtype), action_pos_cast)
+KeyboardInterrupt
+Epoch 4/100:  42%|██████████████████████████████████████████████████████████████████████████▎                                                                                                     | 54/128 [02:07<02:54,  2.35s/it]
+
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ python pldm/train.py
+Using BFloat16 mixed precision training
+/scratch/tshu2/jyu197/CONDA_ENV/ap/lib/python3.9/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+Epoch 1/100 - Learning rates: Encoder=1.00e-04, Dynamics=5.00e-04, Policy=1.00e-03
+Epoch 1/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:29<00:00,  2.58s/it]
+Epoch 1/100 - Avg Reward: -630.8946, Avg Policy Loss: -0.0326, Avg Dynamics Loss: 0.9184
+Epoch 2/100 - Learning rates: Encoder=3.33e-05, Dynamics=2.50e-04, Policy=1.00e-03
+Epoch 2/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:33<00:00,  2.61s/it]
+Epoch 2/100 - Avg Reward: -310.1885, Avg Policy Loss: -0.0970, Avg Dynamics Loss: 0.6399
+Epoch 3/100 - Learning rates: Encoder=1.11e-05, Dynamics=1.25e-04, Policy=1.00e-03
+Epoch 3/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:34<00:00,  2.61s/it]
+Epoch 3/100 - Avg Reward: -838.7732, Avg Policy Loss: -0.0818, Avg Dynamics Loss: 0.5116
+Epoch 4/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 4/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:32<00:00,  2.60s/it]
+Epoch 4/100 - Avg Reward: -639.5377, Avg Policy Loss: -0.0047, Avg Dynamics Loss: 0.4568
+Epoch 5/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 5/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:32<00:00,  2.60s/it]
+Epoch 5/100 - Avg Reward: -532.6568, Avg Policy Loss: 0.0136, Avg Dynamics Loss: 0.4378
+Epoch 6/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 6/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:29<00:00,  2.57s/it]
+Epoch 6/100 - Avg Reward: -679.8386, Avg Policy Loss: 0.0218, Avg Dynamics Loss: 0.4190
+Epoch 7/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 7/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:31<00:00,  2.59s/it]
+Epoch 7/100 - Avg Reward: -544.0367, Avg Policy Loss: 0.0253, Avg Dynamics Loss: 0.4020
+Epoch 8/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 8/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:34<00:00,  2.61s/it]
+Epoch 8/100 - Avg Reward: -613.6416, Avg Policy Loss: 0.0390, Avg Dynamics Loss: 0.3854
+Epoch 9/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 9/100: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:32<00:00,  2.59s/it]
+Epoch 9/100 - Avg Reward: -850.1359, Avg Policy Loss: -0.0041, Avg Dynamics Loss: 0.3718
+Epoch 10/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 10/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:31<00:00,  2.59s/it]
+Epoch 10/100 - Avg Reward: -684.6490, Avg Policy Loss: -0.1116, Avg Dynamics Loss: 0.3575
+Epoch 11/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 11/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:31<00:00,  2.59s/it]
+Epoch 11/100 - Avg Reward: -549.6519, Avg Policy Loss: -0.0125, Avg Dynamics Loss: 0.3441
+Epoch 12/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 12/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:33<00:00,  2.61s/it]
+Epoch 12/100 - Avg Reward: -671.7568, Avg Policy Loss: 0.0906, Avg Dynamics Loss: 0.3322
+Epoch 13/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 13/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 13/100 - Avg Reward: -636.1271, Avg Policy Loss: -0.0045, Avg Dynamics Loss: 0.3191
+Epoch 14/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 14/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.57s/it]
+Epoch 14/100 - Avg Reward: -424.4288, Avg Policy Loss: -0.0222, Avg Dynamics Loss: 0.3068
+Epoch 15/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 15/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:23<00:00,  2.53s/it]
+Epoch 15/100 - Avg Reward: -733.5618, Avg Policy Loss: -0.0163, Avg Dynamics Loss: 0.2985
+Epoch 16/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 16/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 16/100 - Avg Reward: -561.4164, Avg Policy Loss: 0.0085, Avg Dynamics Loss: 0.2881
+Epoch 17/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 17/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.53s/it]
+Epoch 17/100 - Avg Reward: -706.1827, Avg Policy Loss: 0.0747, Avg Dynamics Loss: 0.2796
+Epoch 18/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 18/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:23<00:00,  2.53s/it]
+Epoch 18/100 - Avg Reward: -626.8413, Avg Policy Loss: 0.0462, Avg Dynamics Loss: 0.2726
+Epoch 19/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 19/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:22<00:00,  2.52s/it]
+Epoch 19/100 - Avg Reward: -820.2087, Avg Policy Loss: -0.0946, Avg Dynamics Loss: 0.2607
+Epoch 20/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 20/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:21<00:00,  2.51s/it]
+Epoch 20/100 - Avg Reward: -615.8142, Avg Policy Loss: 0.0518, Avg Dynamics Loss: 0.2549
+Epoch 21/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 21/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:21<00:00,  2.51s/it]
+Epoch 21/100 - Avg Reward: -622.8255, Avg Policy Loss: 0.0452, Avg Dynamics Loss: 0.2475
+Epoch 22/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 22/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.53s/it]
+Epoch 22/100 - Avg Reward: -952.5085, Avg Policy Loss: -0.0024, Avg Dynamics Loss: 0.2409
+Epoch 23/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 23/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 23/100 - Avg Reward: -407.2489, Avg Policy Loss: -0.0500, Avg Dynamics Loss: 0.2367
+Epoch 24/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 24/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:22<00:00,  2.52s/it]
+Epoch 24/100 - Avg Reward: -707.2183, Avg Policy Loss: -0.0285, Avg Dynamics Loss: 0.2314
+Epoch 25/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 25/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:22<00:00,  2.52s/it]
+Epoch 25/100 - Avg Reward: -802.3002, Avg Policy Loss: 0.0368, Avg Dynamics Loss: 0.2270
+Epoch 26/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 26/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.54s/it]
+Epoch 26/100 - Avg Reward: -630.2393, Avg Policy Loss: 0.0326, Avg Dynamics Loss: 0.2211
+Epoch 27/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 27/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:21<00:00,  2.51s/it]
+Epoch 27/100 - Avg Reward: -438.5141, Avg Policy Loss: 0.0970, Avg Dynamics Loss: 0.2180
+Epoch 28/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 28/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 28/100 - Avg Reward: -533.5201, Avg Policy Loss: 0.0034, Avg Dynamics Loss: 0.2111
+Epoch 29/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 29/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.56s/it]
+Epoch 29/100 - Avg Reward: -837.0457, Avg Policy Loss: 0.0342, Avg Dynamics Loss: 0.2078
+Epoch 30/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 30/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 30/100 - Avg Reward: -739.1239, Avg Policy Loss: 0.0250, Avg Dynamics Loss: 0.2043
+Epoch 31/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 31/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 31/100 - Avg Reward: -550.5659, Avg Policy Loss: 0.0554, Avg Dynamics Loss: 0.1987
+Epoch 32/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 32/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 32/100 - Avg Reward: -656.6342, Avg Policy Loss: 0.0444, Avg Dynamics Loss: 0.1972
+Epoch 33/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 33/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.55s/it]
+Epoch 33/100 - Avg Reward: -841.8230, Avg Policy Loss: -0.0167, Avg Dynamics Loss: 0.1950
+Epoch 34/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 34/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 34/100 - Avg Reward: -634.6631, Avg Policy Loss: -0.0166, Avg Dynamics Loss: 0.1923
+Epoch 35/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 35/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 35/100 - Avg Reward: -733.8522, Avg Policy Loss: 0.0296, Avg Dynamics Loss: 0.1877
+Epoch 36/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 36/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 36/100 - Avg Reward: -843.7312, Avg Policy Loss: 0.1104, Avg Dynamics Loss: 0.1853
+Epoch 37/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 37/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 37/100 - Avg Reward: -357.1758, Avg Policy Loss: 0.0701, Avg Dynamics Loss: 0.1867
+Epoch 38/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 38/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 38/100 - Avg Reward: -944.6615, Avg Policy Loss: 0.0608, Avg Dynamics Loss: 0.1808
+Epoch 39/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 39/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:23<00:00,  2.53s/it]
+Epoch 39/100 - Avg Reward: -514.2836, Avg Policy Loss: 0.0283, Avg Dynamics Loss: 0.1801
+Epoch 40/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 40/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 40/100 - Avg Reward: -770.3875, Avg Policy Loss: -0.0120, Avg Dynamics Loss: 0.1819
+Epoch 41/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 41/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.56s/it]
+Epoch 41/100 - Avg Reward: -640.3458, Avg Policy Loss: -0.0412, Avg Dynamics Loss: 0.1792
+Epoch 42/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 42/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 42/100 - Avg Reward: -791.9419, Avg Policy Loss: -0.0563, Avg Dynamics Loss: 0.1786
+Epoch 43/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 43/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:29<00:00,  2.58s/it]
+Epoch 43/100 - Avg Reward: -547.3909, Avg Policy Loss: 0.0111, Avg Dynamics Loss: 0.1750
+Epoch 44/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 44/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:22<00:00,  2.52s/it]
+Epoch 44/100 - Avg Reward: -509.3550, Avg Policy Loss: -0.0265, Avg Dynamics Loss: 0.1701
+Epoch 45/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 45/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 45/100 - Avg Reward: -492.1128, Avg Policy Loss: -0.0087, Avg Dynamics Loss: 0.1714
+Epoch 46/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 46/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 46/100 - Avg Reward: -679.8656, Avg Policy Loss: -0.0021, Avg Dynamics Loss: 0.1671
+Epoch 47/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 47/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:29<00:00,  2.57s/it]
+Epoch 47/100 - Avg Reward: -732.0840, Avg Policy Loss: -0.1284, Avg Dynamics Loss: 0.1693
+Epoch 48/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 48/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 48/100 - Avg Reward: -344.7516, Avg Policy Loss: 0.0267, Avg Dynamics Loss: 0.1699
+Epoch 49/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 49/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:22<00:00,  2.52s/it]
+Epoch 49/100 - Avg Reward: -784.7095, Avg Policy Loss: -0.0298, Avg Dynamics Loss: 0.1645
+Epoch 50/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 50/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 50/100 - Avg Reward: -757.3282, Avg Policy Loss: 0.0336, Avg Dynamics Loss: 0.1668
+Epoch 51/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 51/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.57s/it]
+Epoch 51/100 - Avg Reward: -588.5062, Avg Policy Loss: 0.0038, Avg Dynamics Loss: 0.1643
+Epoch 52/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 52/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 52/100 - Avg Reward: -716.4822, Avg Policy Loss: 0.0515, Avg Dynamics Loss: 0.1639
+Epoch 53/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 53/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 53/100 - Avg Reward: -416.1689, Avg Policy Loss: -0.0498, Avg Dynamics Loss: 0.1615
+Epoch 54/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 54/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 54/100 - Avg Reward: -702.8234, Avg Policy Loss: -0.0371, Avg Dynamics Loss: 0.1585
+Epoch 55/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 55/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 55/100 - Avg Reward: -663.9016, Avg Policy Loss: -0.0255, Avg Dynamics Loss: 0.1634
+Epoch 56/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 56/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 56/100 - Avg Reward: -808.5586, Avg Policy Loss: 0.0166, Avg Dynamics Loss: 0.1636
+Epoch 57/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 57/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:30<00:00,  2.58s/it]
+Epoch 57/100 - Avg Reward: -725.2738, Avg Policy Loss: -0.0015, Avg Dynamics Loss: 0.1593
+Epoch 58/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 58/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.57s/it]
+Epoch 58/100 - Avg Reward: -516.2184, Avg Policy Loss: -0.0666, Avg Dynamics Loss: 0.1587
+Epoch 59/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 59/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 59/100 - Avg Reward: -450.9400, Avg Policy Loss: 0.0864, Avg Dynamics Loss: 0.1575
+Epoch 60/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 60/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.57s/it]
+Epoch 60/100 - Avg Reward: -663.2602, Avg Policy Loss: -0.0131, Avg Dynamics Loss: 0.1604
+Epoch 61/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 61/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 61/100 - Avg Reward: -660.4321, Avg Policy Loss: -0.0796, Avg Dynamics Loss: 0.1590
+Epoch 62/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 62/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 62/100 - Avg Reward: -419.4646, Avg Policy Loss: 0.0191, Avg Dynamics Loss: 0.1551
+Epoch 63/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 63/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:29<00:00,  2.57s/it]
+Epoch 63/100 - Avg Reward: -973.4557, Avg Policy Loss: -0.0041, Avg Dynamics Loss: 0.1586
+Epoch 64/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 64/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 64/100 - Avg Reward: -706.2914, Avg Policy Loss: -0.1081, Avg Dynamics Loss: 0.1557
+Epoch 65/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 65/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 65/100 - Avg Reward: -707.8688, Avg Policy Loss: 0.0045, Avg Dynamics Loss: 0.1569
+Epoch 66/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 66/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.56s/it]
+Epoch 66/100 - Avg Reward: -966.8321, Avg Policy Loss: -0.0332, Avg Dynamics Loss: 0.1541
+Epoch 67/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 67/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.53s/it]
+Epoch 67/100 - Avg Reward: -451.0720, Avg Policy Loss: 0.0116, Avg Dynamics Loss: 0.1566
+Epoch 68/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 68/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:21<00:00,  2.51s/it]
+Epoch 68/100 - Avg Reward: -790.0643, Avg Policy Loss: 0.0101, Avg Dynamics Loss: 0.1559
+Epoch 69/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 69/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.54s/it]
+Epoch 69/100 - Avg Reward: -705.2391, Avg Policy Loss: 0.1224, Avg Dynamics Loss: 0.1535
+Epoch 70/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 70/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 70/100 - Avg Reward: -486.8382, Avg Policy Loss: 0.0584, Avg Dynamics Loss: 0.1544
+Epoch 71/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 71/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 71/100 - Avg Reward: -544.5051, Avg Policy Loss: 0.0845, Avg Dynamics Loss: 0.1523
+Epoch 72/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 72/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 72/100 - Avg Reward: -830.9491, Avg Policy Loss: -0.0255, Avg Dynamics Loss: 0.1534
+Epoch 73/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 73/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 73/100 - Avg Reward: -276.2419, Avg Policy Loss: -0.0704, Avg Dynamics Loss: 0.1544
+Epoch 74/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 74/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:29<00:00,  2.57s/it]
+Epoch 74/100 - Avg Reward: -1126.0618, Avg Policy Loss: 0.0198, Avg Dynamics Loss: 0.1535
+Epoch 75/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 75/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:23<00:00,  2.53s/it]
+Epoch 75/100 - Avg Reward: -705.2486, Avg Policy Loss: -0.1020, Avg Dynamics Loss: 0.1516
+Epoch 76/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 76/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 76/100 - Avg Reward: -732.0964, Avg Policy Loss: 0.0090, Avg Dynamics Loss: 0.1510
+Epoch 77/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 77/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 77/100 - Avg Reward: -790.7497, Avg Policy Loss: 0.0842, Avg Dynamics Loss: 0.1521
+Epoch 78/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 78/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:22<00:00,  2.52s/it]
+Epoch 78/100 - Avg Reward: -918.6800, Avg Policy Loss: -0.0189, Avg Dynamics Loss: 0.1515
+Epoch 79/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 79/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 79/100 - Avg Reward: -859.5304, Avg Policy Loss: 0.0218, Avg Dynamics Loss: 0.1510
+Epoch 80/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 80/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:23<00:00,  2.53s/it]
+Epoch 80/100 - Avg Reward: -551.0539, Avg Policy Loss: -0.0777, Avg Dynamics Loss: 0.1520
+Epoch 81/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 81/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 81/100 - Avg Reward: -709.7981, Avg Policy Loss: 0.0669, Avg Dynamics Loss: 0.1517
+Epoch 82/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 82/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 82/100 - Avg Reward: -888.4483, Avg Policy Loss: 0.0561, Avg Dynamics Loss: 0.1483
+Epoch 83/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 83/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 83/100 - Avg Reward: -655.1014, Avg Policy Loss: -0.0479, Avg Dynamics Loss: 0.1527
+Epoch 84/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 84/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.55s/it]
+Epoch 84/100 - Avg Reward: -627.1209, Avg Policy Loss: -0.0166, Avg Dynamics Loss: 0.1481
+Epoch 85/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 85/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 85/100 - Avg Reward: -849.7443, Avg Policy Loss: -0.0427, Avg Dynamics Loss: 0.1484
+Epoch 86/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 86/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.55s/it]
+Epoch 86/100 - Avg Reward: -537.4245, Avg Policy Loss: -0.1051, Avg Dynamics Loss: 0.1494
+Epoch 87/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 87/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 87/100 - Avg Reward: -716.5725, Avg Policy Loss: -0.0707, Avg Dynamics Loss: 0.1476
+Epoch 88/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 88/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 88/100 - Avg Reward: -626.4308, Avg Policy Loss: 0.0307, Avg Dynamics Loss: 0.1479
+Epoch 89/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 89/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 89/100 - Avg Reward: -1048.9860, Avg Policy Loss: -0.1454, Avg Dynamics Loss: 0.1507
+Epoch 90/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 90/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.53s/it]
+Epoch 90/100 - Avg Reward: -627.5278, Avg Policy Loss: -0.0021, Avg Dynamics Loss: 0.1538
+Epoch 91/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 91/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.53s/it]
+Epoch 91/100 - Avg Reward: -548.6713, Avg Policy Loss: 0.0262, Avg Dynamics Loss: 0.1463
+Epoch 92/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 92/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.55s/it]
+Epoch 92/100 - Avg Reward: -750.7202, Avg Policy Loss: 0.0995, Avg Dynamics Loss: 0.1479
+Epoch 93/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 93/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:24<00:00,  2.54s/it]
+Epoch 93/100 - Avg Reward: -560.1099, Avg Policy Loss: -0.0069, Avg Dynamics Loss: 0.1477
+Epoch 94/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 94/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.54s/it]
+Epoch 94/100 - Avg Reward: -421.6170, Avg Policy Loss: -0.0228, Avg Dynamics Loss: 0.1481
+Epoch 95/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 95/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:25<00:00,  2.55s/it]
+Epoch 95/100 - Avg Reward: -636.6504, Avg Policy Loss: 0.0890, Avg Dynamics Loss: 0.1473
+Epoch 96/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 96/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:26<00:00,  2.55s/it]
+Epoch 96/100 - Avg Reward: -393.6439, Avg Policy Loss: 0.0722, Avg Dynamics Loss: 0.1450
+Epoch 97/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 97/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.56s/it]
+Epoch 97/100 - Avg Reward: -658.1159, Avg Policy Loss: 0.0623, Avg Dynamics Loss: 0.1448
+Epoch 98/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 98/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:28<00:00,  2.57s/it]
+Epoch 98/100 - Avg Reward: -563.0883, Avg Policy Loss: -0.1191, Avg Dynamics Loss: 0.1478
+Epoch 99/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 99/100: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:29<00:00,  2.58s/it]
+Epoch 99/100 - Avg Reward: -608.0853, Avg Policy Loss: 0.0752, Avg Dynamics Loss: 0.1483
+Epoch 100/100 - Learning rates: Encoder=3.70e-06, Dynamics=6.25e-05, Policy=1.00e-03
+Epoch 100/100: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 128/128 [05:27<00:00,  2.56s/it]
+Epoch 100/100 - Avg Reward: -474.9175, Avg Policy Loss: -0.0868, Avg Dynamics Loss: 0.1452
+(/scratch/tshu2/jyu197/CONDA_ENV/ap) [jyu197@c015 PLDM]$ python pldm/test.py
+Loading model from output3/best_model.pt
+Loaded model directly from checkpoint
+
+Model summary:
+Encoder: 59168 parameters
+Dynamics: 82976 parameters
+Total trainable parameters: 225664
+Model set to evaluation mode
+
+Episode 1/10
+  Step 0: Distance: 24.33, Reward: -24.33
+  Step 10: Distance: 24.65, Reward: -24.65
+  Step 20: Distance: 10.28, Reward: -10.28
+  Step 30: Distance: 26.09, Reward: -26.09
+  Step 39: Distance: 7.87, Reward: -7.87
+
+Episode 1 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 7.8727
+  Custom reward total: -889.02
+  In same room as target: False
+
+Episode 2/10
+  Step 0: Distance: 23.60, Reward: -23.60
+  Step 10: Distance: 18.47, Reward: -18.47
+  Step 20: Distance: 11.95, Reward: -11.95
+  Step 30: Distance: 19.69, Reward: -19.69
+  Step 39: Distance: 35.52, Reward: -35.52
+
+Episode 2 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 35.5178
+  Custom reward total: -612.91
+  In same room as target: False
+
+Episode 3/10
+  Step 0: Distance: 41.50, Reward: -41.50
+  Step 10: Distance: 39.76, Reward: -39.76
+  Step 20: Distance: 26.64, Reward: -26.64
+  Step 30: Distance: 20.65, Reward: -20.65
+  Step 39: Distance: 30.91, Reward: -30.91
+
+Episode 3 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 30.9097
+  Custom reward total: -1174.26
+  In same room as target: False
+
+Episode 4/10
+  Step 0: Distance: 37.49, Reward: -37.49
+  Step 10: Distance: 42.18, Reward: -42.18
+  Step 20: Distance: 30.14, Reward: -30.14
+  Step 30: Distance: 33.30, Reward: -33.30
+  Step 39: Distance: 27.66, Reward: -27.66
+
+Episode 4 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 27.6617
+  Custom reward total: -1440.60
+  In same room as target: False
+
+Episode 5/10
+  Step 0: Distance: 32.69, Reward: -32.69
+  Step 10: Distance: 20.46, Reward: -20.46
+  Step 20: Distance: 23.63, Reward: -23.63
+  Step 30: Distance: 22.67, Reward: -22.67
+  Step 39: Distance: 17.69, Reward: -17.69
+
+Episode 5 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 17.6941
+  Custom reward total: -873.61
+  In same room as target: False
+
+Episode 6/10
+  Step 0: Distance: 28.99, Reward: -28.99
+  Step 10: Distance: 35.93, Reward: -35.93
+  Step 20: Distance: 31.80, Reward: -31.80
+  Step 30: Distance: 28.39, Reward: -18.39
+  Step 39: Distance: 24.32, Reward: -14.32
+
+Episode 6 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 24.3194
+  Custom reward total: -1055.58
+  In same room as target: True
+
+Episode 7/10
+  Step 0: Distance: 42.30, Reward: -42.30
+  Step 10: Distance: 62.96, Reward: -62.96
+  Step 20: Distance: 66.10, Reward: -66.10
+  Step 30: Distance: 66.70, Reward: -66.70
+  Step 39: Distance: 66.86, Reward: -66.86
+
+Episode 7 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 66.8575
+  Custom reward total: -2529.66
+  In same room as target: False
+
+Episode 8/10
+  Step 0: Distance: 40.07, Reward: -40.07
+  Step 10: Distance: 40.41, Reward: -40.41
+  Step 20: Distance: 42.64, Reward: -42.64
+  Step 30: Distance: 47.54, Reward: -47.54
+  Step 39: Distance: 45.80, Reward: -45.80
+
+Episode 8 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 45.8049
+  Custom reward total: -1716.82
+  In same room as target: False
+
+Episode 9/10
+  Step 0: Distance: 37.42, Reward: -37.42
+  Step 10: Distance: 43.48, Reward: -43.48
+  Step 20: Distance: 52.79, Reward: -52.79
+  Step 30: Distance: 42.01, Reward: -42.01
+  Step 39: Distance: 31.77, Reward: -31.77
+
+Episode 9 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 31.7683
+  Custom reward total: -1749.26
+  In same room as target: False
+
+Episode 10/10
+  Step 0: Distance: 34.49, Reward: -34.49
+  Step 10: Distance: 22.70, Reward: -12.70
+  Step 20: Distance: 15.69, Reward: -5.69
+  Step 30: Distance: 25.22, Reward: -15.22
+  Step 39: Distance: 13.74, Reward: -3.74
+
+Episode 10 summary:
+  Length: 40 steps
+  Success: False
+  Final distance to target: 13.7381
+  Custom reward total: -742.06
+  In same room as target: True
+
+Overall performance:
+  Success rate: 0.00 (0/10)
+  Average custom reward: -1278.38
+  Note: Custom rewards include distance penalties and same-room bonuses

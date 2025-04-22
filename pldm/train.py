@@ -162,7 +162,7 @@ class TrainConfig(ConfigBase):
 
 class LimitedStepLR(torch.optim.lr_scheduler.StepLR):
     """Modified StepLR that stops decreasing after a maximum number of epochs"""
-    def __init__(self, optimizer, step_size, gamma, max_epochs=3, last_epoch=-1, verbose=False):
+    def __init__(self, optimizer, step_size, gamma, max_epochs, last_epoch=-1, verbose=False):
         self.max_epochs = max_epochs
         super().__init__(optimizer, step_size, gamma, last_epoch, verbose)
     
@@ -867,12 +867,12 @@ def train_pldm(args):
     
     # Create learning rate scheduler for encoder that stops after 4 epochs
     encoder_scheduler = LimitedStepLR(
-        encoder_optimizer, step_size=1, gamma=1/3, max_epochs=4
+        encoder_optimizer, max_epochs=1, step_size=1, gamma=1/3
     )
     
     # Create learning rate scheduler for dynamics model that stops after 4 epochs
     dynamics_scheduler = LimitedStepLR(
-        dynamics_optimizer, step_size=1, gamma=0.5, max_epochs=4  # 0.5 = 1/2
+        dynamics_optimizer, max_epochs=1, step_size=1, gamma=0.5  # 0.5 = 1/2
     )
     
     # Check if resume from checkpoint
@@ -919,6 +919,8 @@ def train_pldm(args):
         total_reward = 0
         total_policy_loss = 0
         total_dynamics_loss = 0
+        total_next_state_loss = 0
+        total_on_the_same_page_loss = 0
         num_episodes = 0
         
         # Log current learning rates
@@ -945,7 +947,7 @@ def train_pldm(args):
             batch_log_probs = []
             batch_returns = []
             batch_rewards = []
-            
+            batch_next_goals = []
             # Collect batch_size trajectories (or whatever remains in the epoch)
             batch_size = min(args.batch_size, args.episodes_per_epoch - episode_idx)
             valid_episodes = 0
@@ -965,6 +967,7 @@ def train_pldm(args):
                     states = trajectory['states']
                     actions = trajectory['actions']
                     log_probs = trajectory['log_probs']
+                    next_goals = trajectory['next_goals']
                     
                     # Skip empty trajectories
                     if len(states) <= 1 or len(log_probs) == 0:
@@ -1023,6 +1026,21 @@ def train_pldm(args):
                             a_tensor = a_tensor.float()
                             
                         actions_tensor.append(a_tensor)
+
+                    next_goals_tensor = []
+                    for ng in next_goals:
+                        if isinstance(ng, torch.Tensor):
+                            ng_tensor = ng.to(device=device)
+                        else:
+                            ng_tensor = torch.tensor(ng, device=device)
+
+                        if bf16_supported:
+                            ng_tensor = ng_tensor.to(torch.bfloat16)
+                        else:
+                            ng_tensor = ng_tensor.float()
+                            
+                        next_goals_tensor.append(ng_tensor)
+                            
                     
                     # Add to batch data
                     batch_states.extend(states_tensor)
@@ -1031,7 +1049,7 @@ def train_pldm(args):
                     batch_log_probs.extend(log_probs)
                     batch_returns.extend(returns.tolist())
                     batch_rewards.append(episode_reward)
-                    
+                    batch_next_goals.extend(next_goals_tensor)
                     valid_episodes += 1
                     num_episodes += 1
                     
@@ -1055,7 +1073,6 @@ def train_pldm(args):
             dtype = torch.bfloat16 if bf16_supported else torch.float32
             batch_log_probs_tensor = torch.tensor(batch_log_probs, dtype=torch.float32, device=device)
             batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
-            
             # Reset gradients for both optimizers
             encoder_optimizer.zero_grad()
             dynamics_optimizer.zero_grad()
@@ -1068,7 +1085,9 @@ def train_pldm(args):
                 
                 # Dynamics loss (JEPA objective)
                 dynamics_loss = 0
-                for state, next_state, action in zip(batch_states, batch_next_states, batch_actions):
+                next_state_loss = 0
+                on_the_same_page_loss = 0
+                for state, next_state, action, next_goal in zip(batch_states, batch_next_states, batch_actions, batch_next_goals):
                     # Encode current and next state
                     z_t = model.encode(state.unsqueeze(0))
                     z_next_actual = model.encode(next_state.unsqueeze(0))
@@ -1079,12 +1098,14 @@ def train_pldm(args):
                     
                     # Add to dynamics loss
                     dynamics_loss += F.mse_loss(z_next_pred, z_next_actual)
-                
+                    # next_state_loss += F.mse_loss(next_goal, z_next_actual)
+                    on_the_same_page_loss += F.mse_loss(next_goal, z_next_pred)
                 if len(batch_states) > 0:
                     dynamics_loss = dynamics_loss / len(batch_states)
-                
+                    # next_state_loss = next_state_loss / len(batch_states)
+                    on_the_same_page_loss = on_the_same_page_loss / len(batch_states)
                 # Total loss
-                loss = policy_loss + args.lambda_dynamics * dynamics_loss
+                loss = policy_loss + args.lambda_dynamics * (dynamics_loss + on_the_same_page_loss) #+ next_state_loss
             
             # Backward pass and optimize
             loss.backward()
@@ -1095,10 +1116,13 @@ def train_pldm(args):
             # Update statistics
             total_policy_loss += policy_loss.item() * valid_episodes
             total_dynamics_loss += dynamics_loss.item() * valid_episodes
-            
+            # total_next_state_loss += next_state_loss.item() * valid_episodes
+            total_on_the_same_page_loss += on_the_same_page_loss.item() * valid_episodes
             # Log batch metrics
             writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
             writer.add_scalar('Loss/dynamics', dynamics_loss.item(), global_step)
+            # writer.add_scalar('Loss/next_state', next_state_loss.item(), global_step)
+            writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
             writer.add_scalar('Loss/total', loss.item(), global_step)
             writer.add_scalar('Reward/batch_mean', sum(batch_rewards)/len(batch_rewards), global_step)
             
@@ -1111,11 +1135,14 @@ def train_pldm(args):
             avg_reward = total_reward / num_episodes
             avg_policy_loss = total_policy_loss / num_episodes
             avg_dynamics_loss = total_dynamics_loss / num_episodes
-            
+            # avg_next_state_loss = total_next_state_loss / num_episodes
+            avg_on_the_same_page_loss = total_on_the_same_page_loss / num_episodes
             print(f"Epoch {epoch+1}/{args.epochs} - "
                   f"Avg Reward: {avg_reward:.4f}, "
                   f"Avg Policy Loss: {avg_policy_loss:.4f}, "
-                  f"Avg Dynamics Loss: {avg_dynamics_loss:.4f}")
+                  f"Avg Dynamics Loss: {avg_dynamics_loss:.4f}, "
+                  # f"Avg Next State Loss: {avg_next_state_loss:.4f}, "
+                  f"Avg On the Same Page Loss: {avg_on_the_same_page_loss:.4f}")
             
             # Save best model
             if avg_reward > best_reward:
@@ -1153,23 +1180,23 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=64, help='Dimension of encoded state')
-    parser.add_argument('--hidden_dim', type=int, default=128, help='Dimension of hidden layers')
+    parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
+    parser.add_argument('--hidden_dim', type=int, default=256, help='Dimension of hidden layers')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--episodes_per_epoch', type=int, default=128, help='Number of episodes per epoch')
-    parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
+    parser.add_argument('--batch_size', type=int, default=8, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=40, help='Maximum steps per episode')
     parser.add_argument('--search_steps', type=int, default=60, help='Number of steps for action search')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lambda_dynamics', type=float, default=1, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=0.5, help='Weight for dynamics loss')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     
     # Optimizer parameters
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=5e-4, help='Learning rate for policy')
+    parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=True, help='Use BFloat16 mixed precision for training')
@@ -1177,7 +1204,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output3', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_2loss', help='Directory to save model and logs')
     parser.add_argument('--resume', action='store_true', help='Resume training from checkpoint')
     
     return parser.parse_args()
