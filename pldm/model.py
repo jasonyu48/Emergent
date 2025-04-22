@@ -159,20 +159,20 @@ class NextGoalPredictor(nn.Module):
         
         self.mlp = nn.Sequential(*layers)
         
-        # For stochastic policy, we'll predict mean and log_std
+        # For stochastic policy, we'll predict mean only
         self.mean = nn.Linear(encoding_dim, encoding_dim)
-        self.log_std = nn.Parameter(torch.zeros(1, encoding_dim))
+        # Use fixed log_std of 0 instead of learnable parameter
+        self.log_std = 0.0
     
     def forward(self, z_t):
         # Apply MLP
         features = self.mlp(z_t)
         
-        # Predict mean and use global log_std
+        # Predict mean and use fixed log_std of 0
         mean = self.mean(features)
-        log_std = self.log_std.expand_as(mean)
         
-        # Create distribution
-        std = log_std.exp()
+        # Create distribution with fixed std of 1.0 (since log(1.0) = 0.0)
+        std = torch.ones_like(mean)
         dist = Normal(mean, std)
         
         # Sample next goal
@@ -230,7 +230,7 @@ class PLDMModel(nn.Module):
         """Predict next state given current encoded state and action"""
         return self.dynamics(z_t, a_t)
     
-    def search_action(self, z_t, z_target, num_steps=10, lr=1, verbose=False, max_step_norm=12.25):
+    def search_action(self, z_t, z_target, num_steps=30, lr=0.5, verbose=False, max_step_norm=15):
         """Search for the action that leads from z_t to z_target"""
         # Detach inputs but keep dtype and device
         dtype = z_t.dtype

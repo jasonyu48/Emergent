@@ -160,6 +160,20 @@ class TrainConfig(ConfigBase):
         self.objectives_l1.idm.action_dim = self.hjepa.level1.action_dim
 
 
+class LimitedStepLR(torch.optim.lr_scheduler.StepLR):
+    """Modified StepLR that stops decreasing after a maximum number of epochs"""
+    def __init__(self, optimizer, step_size, gamma, max_epochs=4, last_epoch=-1, verbose=False):
+        self.max_epochs = max_epochs
+        super().__init__(optimizer, step_size, gamma, last_epoch, verbose)
+    
+    def get_lr(self):
+        if self.last_epoch < self.max_epochs:
+            return super().get_lr()
+        else:
+            # Keep LR the same after max_epochs
+            return [group['lr'] for group in self.optimizer.param_groups]
+
+
 class Trainer:
     def __init__(self, config: TrainConfig):
         self.config = config
@@ -851,16 +865,14 @@ def train_pldm(args):
         {'params': model.next_goal_predictor.parameters(), 'lr': args.policy_lr}
     ])
     
-    # Create learning rate scheduler for encoder
-    # Reduces learning rate to 1/3 every epoch (changed from every 2 epochs)
-    encoder_scheduler = torch.optim.lr_scheduler.StepLR(
-        encoder_optimizer, step_size=1, gamma=1/3
+    # Create learning rate scheduler for encoder that stops after 4 epochs
+    encoder_scheduler = LimitedStepLR(
+        encoder_optimizer, step_size=1, gamma=1/3, max_epochs=4
     )
     
-    # Create learning rate scheduler for dynamics model
-    # Reduces learning rate by a factor of 2 every epoch
-    dynamics_scheduler = torch.optim.lr_scheduler.StepLR(
-        dynamics_optimizer, step_size=1, gamma=0.5  # 0.5 = 1/2
+    # Create learning rate scheduler for dynamics model that stops after 4 epochs
+    dynamics_scheduler = LimitedStepLR(
+        dynamics_optimizer, step_size=1, gamma=0.5, max_epochs=4  # 0.5 = 1/2
     )
     
     # Check if resume from checkpoint
@@ -1141,18 +1153,18 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=128, help='Dimension of encoded state')
+    parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
     parser.add_argument('--hidden_dim', type=int, default=256, help='Dimension of hidden layers')
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=8, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=30, help='Number of training epochs')
     parser.add_argument('--episodes_per_epoch', type=int, default=128, help='Number of episodes per epoch')
-    parser.add_argument('--batch_size', type=int, default=8, help='Number of trajectories to process in a batch')
-    parser.add_argument('--max_steps_per_episode', type=int, default=50, help='Maximum steps per episode')
-    parser.add_argument('--search_steps', type=int, default=10, help='Number of steps for action search')
+    parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
+    parser.add_argument('--max_steps_per_episode', type=int, default=20, help='Maximum steps per episode')
+    parser.add_argument('--search_steps', type=int, default=30, help='Number of steps for action search')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--lambda_dynamics', type=float, default=0.3, help='Weight for dynamics loss')
-    parser.add_argument('--max_step_norm', type=float, default=12.25, help='Maximum step norm (5x original 2.45)')
+    parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm (5x original 2.45)')
     
     # Optimizer parameters
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
