@@ -191,9 +191,9 @@ class PLDMModel(nn.Module):
         self,
         img_size=64,
         in_channels=3,
-        encoding_dim=128,
+        encoding_dim=64,
         action_dim=2,
-        hidden_dim=256
+        hidden_dim=128
     ):
         super().__init__()
         
@@ -230,7 +230,7 @@ class PLDMModel(nn.Module):
         """Predict next state given current encoded state and action"""
         return self.dynamics(z_t, a_t)
     
-    def search_action(self, z_t, z_target, num_steps=30, lr=0.5, verbose=False, max_step_norm=15):
+    def search_action(self, z_t, z_target, num_steps=60, lr=0.5, verbose=False, max_step_norm=15):
         """Search for the action that leads from z_t to z_target"""
         # Detach inputs but keep dtype and device
         dtype = z_t.dtype
@@ -241,10 +241,9 @@ class PLDMModel(nn.Module):
             print(f"z_t shape: {z_t.shape}, dtype: {dtype}")
             print(f"z_target shape: {z_target.shape}, dtype: {dtype}")
         
-        # Initialize action from uniform distribution within the environment's action bounds
-        # The default value for max_step_norm in the DotWall environment is 12.25
+        # Initialize action from uniform distribution within a smaller range (2/3 of the environment's action bounds)
         action = torch.rand(z_t.shape[0], self.action_dim, device=device, dtype=torch.float32) 
-        action = action * 2 * max_step_norm - max_step_norm  # Scale to [-max_step_norm, max_step_norm]
+        action = action * 2 * (2*max_step_norm/3) - (2*max_step_norm/3)  # Scale to [-2*max_step_norm/3, 2*max_step_norm/3]
         
         if verbose:
             print(f"Initial action: {action.cpu().numpy()}, norm: {action.norm().item():.4f}")

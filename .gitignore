@@ -5,6 +5,6 @@ logs/
 checkpoint/
 *__pycache__*
 
-output
 debug_output
-test_output
+test_output*
+output*

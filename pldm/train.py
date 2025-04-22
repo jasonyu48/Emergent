@@ -162,7 +162,7 @@ class TrainConfig(ConfigBase):
 
 class LimitedStepLR(torch.optim.lr_scheduler.StepLR):
     """Modified StepLR that stops decreasing after a maximum number of epochs"""
-    def __init__(self, optimizer, step_size, gamma, max_epochs=4, last_epoch=-1, verbose=False):
+    def __init__(self, optimizer, step_size, gamma, max_epochs=3, last_epoch=-1, verbose=False):
         self.max_epochs = max_epochs
         super().__init__(optimizer, step_size, gamma, last_epoch, verbose)
     
@@ -834,7 +834,7 @@ def train_pldm(args):
         return x
     
     # Create environment
-    env = DotWall(max_step_norm=args.max_step_norm)
+    env = DotWall(max_step_norm=args.max_step_norm, door_space=8)
     
     # Create model
     model = PLDMModel(
@@ -1153,23 +1153,23 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='Dimension of hidden layers')
+    parser.add_argument('--encoding_dim', type=int, default=64, help='Dimension of encoded state')
+    parser.add_argument('--hidden_dim', type=int, default=128, help='Dimension of hidden layers')
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=30, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--episodes_per_epoch', type=int, default=128, help='Number of episodes per epoch')
     parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
-    parser.add_argument('--max_steps_per_episode', type=int, default=20, help='Maximum steps per episode')
-    parser.add_argument('--search_steps', type=int, default=30, help='Number of steps for action search')
+    parser.add_argument('--max_steps_per_episode', type=int, default=40, help='Maximum steps per episode')
+    parser.add_argument('--search_steps', type=int, default=60, help='Number of steps for action search')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lambda_dynamics', type=float, default=0.3, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1, help='Weight for dynamics loss')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     
     # Optimizer parameters
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-3, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
+    parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=5e-4, help='Learning rate for policy')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=True, help='Use BFloat16 mixed precision for training')
@@ -1177,7 +1177,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output3', help='Directory to save model and logs')
     parser.add_argument('--resume', action='store_true', help='Resume training from checkpoint')
     
     return parser.parse_args()

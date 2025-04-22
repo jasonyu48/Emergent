@@ -32,7 +32,7 @@ class WallDatasetConfig(DotDatasetConfig):
     wall_padding: int = 20
     door_padding: int = 10
     wall_width: int = 3
-    door_space: int = 4
+    door_space: int = 8
     cross_wall_rate: float = 0.1
     expert_cross_wall_rate: float = 0.0
     expert_action_step_mean: float = 0.9

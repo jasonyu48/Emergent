@@ -18,7 +18,7 @@ class DotWall(gym.Env):
         rng: Optional[np.random.Generator] = None,
         border_wall_loc: int = 5,
         wall_width: int = 3,
-        door_space: int = 4,
+        door_space: int = 8,
         wall_padding: int = 20,
         img_size: int = 64,
         fix_wall: bool = True,
