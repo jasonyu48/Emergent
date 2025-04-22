@@ -144,14 +144,14 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
-    parser.add_argument('--model_path', type=str, required=True, help='Path to trained model')
+    parser.add_argument('--model_path', type=str, required=True, default='output/model.pt', help='Path to trained model')
     parser.add_argument('--output_dir', type=str, default='test_output', help='Directory to save test results')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=5, help='Number of episodes to evaluate')
-    parser.add_argument('--max_steps', type=int, default=50, help='Maximum steps per episode')
-    parser.add_argument('--search_steps', type=int, default=10, help='Number of steps for action search')
-    parser.add_argument('--max_step_norm', type=float, default=12.25, help='Maximum step norm (5x original 2.45)')
+    parser.add_argument('--max_steps', type=int, default=20, help='Maximum steps per episode')
+    parser.add_argument('--search_steps', type=int, default=30, help='Number of steps for action search')
+    parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--bf16', action='store_true', help='Use BFloat16 precision for evaluation')
     
     return parser.parse_args()

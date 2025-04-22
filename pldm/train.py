@@ -1164,7 +1164,7 @@ def parse_args():
     parser.add_argument('--search_steps', type=int, default=30, help='Number of steps for action search')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--lambda_dynamics', type=float, default=0.3, help='Weight for dynamics loss')
-    parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm (5x original 2.45)')
+    parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     
     # Optimizer parameters
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
