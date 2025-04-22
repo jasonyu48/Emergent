@@ -26,7 +26,7 @@ class DotWall(gym.Env):
         level: str = "medium",
         n_steps: int = 200,
         action_step_mean: float = 1.0,
-        max_step_norm: float = 2.45,
+        max_step_norm: float = 12.25,
         device: Optional[torch.device] = None,
         fix_wall_location: Optional[int] = 32,
         fix_door_location: Optional[int] = 10,
@@ -54,7 +54,7 @@ class DotWall(gym.Env):
             low=-max_step_norm, high=max_step_norm, shape=(2,), dtype=np.float32
         )
         self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(2, img_size, img_size), dtype=np.float32
+            low=0.0, high=1.0, shape=(3, img_size, img_size), dtype=np.float32
         )
 
         self.fix_wall = fix_wall
@@ -280,10 +280,12 @@ class DotWall(gym.Env):
 
     def _render_dot_and_wall(self):
         dot_img = self._render_dot(self.dot_position)
-        obs_output = torch.stack([dot_img, self.wall_img], dim=0)
+        target_img = self._render_dot(self.target_position)
+        obs_output = torch.stack([dot_img, self.wall_img, target_img], dim=0)
         return obs_output
 
     def _render_dot_and_wall_target(self, location):
         dot_img = self._render_dot(location)
-        obs_output = torch.stack([dot_img, self.wall_img], dim=0)
+        target_img = self._render_dot(self.target_position)
+        obs_output = torch.stack([dot_img, self.wall_img, target_img], dim=0)
         return obs_output

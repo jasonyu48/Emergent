@@ -4,3 +4,7 @@ logs/
 .vscode/
 checkpoint/
 *__pycache__*
+
+output
+debug_output
+test_output

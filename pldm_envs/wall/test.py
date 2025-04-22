@@ -57,7 +57,11 @@ def test_env():
 
     frames = []
     for obs, target in zip(obses, targets):
-        joint_frame = torch.cat([obs, target], dim=2)
+        # Create a frame that visualizes all channels
+        # obs[0] = dot position channel
+        # obs[1] = wall channel
+        # obs[2] = target position channel
+        joint_frame = torch.cat([obs[0].unsqueeze(0), obs[1].unsqueeze(0), obs[2].unsqueeze(0)], dim=2)
         joint_frame = joint_frame.max(dim=0)[0]  # Take the max value for each pixel
         frames.append(joint_frame)
 

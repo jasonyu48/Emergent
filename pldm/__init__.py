@@ -1,4 +1,3 @@
 """
-PLDM is an implementation of planning with 
-joint-embedding predictive architectures (JEPA).
+Planning with Latent Dynamics Model (PLDM) package.
 """
