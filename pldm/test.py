@@ -152,7 +152,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     
     # Calculate reward
     distance_reward = -distance  # Negative distance as reward
-    same_room_bonus = torch.where(same_room, torch.tensor(100.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
+    same_room_bonus = torch.where(same_room, torch.tensor(50.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
     return distance_reward + same_room_bonus
 
@@ -485,13 +485,13 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
-    parser.add_argument('--model_path', type=str, default='output_large_model3/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='test_output_large_model3', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_large_model3/checkpoint.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='test_output_large_model3_checkpoint', help='Directory to save test results')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to evaluate')
     parser.add_argument('--max_steps', type=int, default=40, help='Maximum steps per episode')
-    parser.add_argument('--num_samples', type=int, default=100, help='Number of action samples to evaluate in parallel')
+    parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 precision for evaluation')
     parser.add_argument('--encoder_embedding', type=int, default=256, help='Dimension of encoder embedding')
