@@ -291,6 +291,28 @@ class NextGoalPredictor(nn.Module):
         
         return z_next, log_prob
 
+    # ---------------------------------------------------------------------
+    #  Utility: return distribution / log‑prob for a given sampled goal
+    # ---------------------------------------------------------------------
+    def _get_distribution(self, z_t):
+        """Return Normal distribution N(mean(z_t), 1)."""
+        # reuse same computation as in forward without sampling
+        x = self.input_activation(self.input_proj(z_t))
+        for block, layer_norm in zip(self.residual_blocks, self.layer_norms):
+            residual = x
+            for layer in block:
+                x = layer(x)
+            x = layer_norm(x + residual)
+        features = self.output_proj(x)
+        mean = self.mean(features)
+        std = torch.ones_like(mean)
+        return Normal(mean, std)
+
+    def log_prob(self, z_t, z_sample):
+        """Log probability of `z_sample` under the policy p(z_next|z_t)."""
+        dist = self._get_distribution(z_t)
+        return dist.log_prob(z_sample).sum(dim=-1)
+
 
 class PLDMModel(nn.Module):
     """Complete PLDM model with encoder, dynamics model, and next-goal predictor"""

@@ -711,112 +711,61 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=500
         if done or truncated:
             break
         
-        try:
-            # Predict next goal
-            with torch.no_grad():
-                # Ensure z_t has correct dtype
-                if z_t.dtype != dtype:
-                    z_t = z_t.to(dtype)
-                    
-                z_next, log_prob = model.predict_next_goal(z_t)
-                next_goals.append(z_next.cpu())
-                log_probs.append(log_prob.item())
-            
-            # Action search needs z_t and z_next to be detached
-            z_t_detached = z_t.clone().detach()
-            z_next_detached = z_next.clone().detach()
-            
-            # Search for action using detached tensors
-            try:
-                a_t = model.search_action(
-                    z_t_detached.to(dtype), 
-                    z_next_detached.to(dtype), 
-                    num_samples=num_samples
-                )
-            except Exception as e:
-                print(f"Error in search_action: {e}")
-                # Fallback to a random action if search fails
-                a_t = torch.randn(z_t.shape[0], model.action_dim, device=device).to(dtype)
-                print("Using fallback random action")
-            
-            # Take action in environment
-            # Convert to float32 before converting to NumPy since NumPy doesn't support bfloat16
-            action = a_t.to(torch.float32).cpu().numpy()[0]
-            obs, reward, done, truncated, info = env.step(action)
-            
-            # Store information
-            states.append(obs)
-            actions.append(action)
-            rewards.append(reward)
-            
-            # Update current encoding
-            with torch.no_grad():
-                # Convert observation to tensor
-                if isinstance(obs, torch.Tensor):
-                    obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
-                else:
-                    obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+        
+        # Predict next goal
+        with torch.no_grad():
+            # Ensure z_t has correct dtype
+            if z_t.dtype != dtype:
+                z_t = z_t.to(dtype)
                 
-                # Encode next observation
-                try:
-                    z_t = model.encode(obs_tensor)
-                except RuntimeError as e:
-                    if "Input type" in str(e) and "bias type" in str(e):
-                        print(f"BFloat16 conversion error in step {step}: {e}")
-                        # Fix bias issue in specific conv layers
-                        for module in model.encoder.modules():
-                            if isinstance(module, nn.Conv2d) and module.bias is not None:
-                                module.bias = nn.Parameter(module.bias.to(dtype))
-                        
-                        # Try encoding again
-                        z_t = model.encode(obs_tensor)
-                
-        except Exception as e:
-            print(f"Error during rollout at step {step}: {str(e)}")
-            # Print more detailed information for debugging
-            print(f"z_t shape: {z_t.shape}, dtype: {z_t.dtype}, requires_grad: {z_t.requires_grad}")
-            if 'z_next' in locals():
-                print(f"z_next shape: {z_next.shape}, dtype: {z_next.dtype}, requires_grad: {z_next.requires_grad}")
-            if 'a_t' in locals():
-                print(f"a_t shape: {a_t.shape}, dtype: {a_t.dtype}")
-            # Don't stop the training - allow fallback to continue
-            # use a random action instead
-            a_t = torch.randn(z_t.shape[0], model.action_dim, device=device).to(dtype)
-            # Convert to float32 before converting to NumPy
-            action = a_t.to(torch.float32).cpu().numpy()[0]
+            z_next, log_prob = model.predict_next_goal(z_t)
+            next_goals.append(z_next.cpu())
+            log_probs.append(log_prob.item())
+        
+        # Action search needs z_t and z_next to be detached
+        z_t_detached = z_t.clone().detach()
+        z_next_detached = z_next.clone().detach()
+        
+        # Search for action using detached tensors
+        a_t = model.search_action(
+            z_t_detached.to(dtype), 
+            z_next_detached.to(dtype), 
+            num_samples=num_samples
+        )
+
+        # Take action in environment
+        # Convert to float32 before converting to NumPy since NumPy doesn't support bfloat16
+        action = a_t.to(torch.float32).cpu().numpy()[0]
+        obs, reward, done, truncated, info = env.step(action)
+
+        # ----------------------------------------------------------------------------------
+        # Use distance‑based custom reward (same definition as in the test script) instead
+        # of the environment‑supplied reward so that train‑time and test‑time signals match.
+        # ----------------------------------------------------------------------------------
+        dot_position = env.dot_position.unsqueeze(0)
+        target_position = env.target_position.unsqueeze(0)
+        custom_reward = calculate_distance_reward(
+            dot_position,
+            target_position,
+            env.wall_x,
+            env.wall_width,
+        ).item()
+
+        # Store information
+        states.append(obs)
+        actions.append(action)
+        rewards.append(custom_reward)
+        
+        # Update current encoding
+        with torch.no_grad():
+            # Convert observation to tensor
+            if isinstance(obs, torch.Tensor):
+                obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+            else:
+                obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
             
-            try:
-                obs, reward, done, truncated, info = env.step(action)
-                states.append(obs)
-                actions.append(action)
-                rewards.append(reward)
-                
-                # Update current encoding
-                with torch.no_grad():
-                    if isinstance(obs, torch.Tensor):
-                        obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
-                    else:
-                        obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
-                    
-                    # Try encoding again with extra error handling
-                    try:
-                        z_t = model.encode(obs_tensor)
-                    except RuntimeError as e:
-                        if "Input type" in str(e) and "bias type" in str(e):
-                            print(f"BFloat16 conversion error in recovery: {e}")
-                            # Fix bias issue
-                            for module in model.encoder.modules():
-                                if isinstance(module, nn.Conv2d) and module.bias is not None:
-                                    module.bias = nn.Parameter(module.bias.to(dtype))
-                            
-                            # Try encoding one more time
-                            z_t = model.encode(obs_tensor)
-                    except Exception as nested_e:
-                        print(f"Failed to recover with random action: {nested_e}")
-                        break
-            except Exception as nested_e:
-                print(f"Failed to recover with random action: {nested_e}")
-                break
+            # Encode next observation
+            z_t = model.encode(obs_tensor)
     
     # Set model back to training mode
     model.train()
@@ -972,10 +921,6 @@ class ParallelEpisodeCollector:
                 if len(trajectory['states']) <= 1 or len(trajectory['log_probs']) == 0:
                     continue
                     
-                # Calculate rewards based on distances
-                rewards = calculate_custom_reward(trajectory['states'], env)
-                trajectory['rewards'] = rewards
-                
                 # Put episode in queue
                 try:
                     self.episode_queue.put(trajectory, block=True, timeout=5.0)
@@ -1037,8 +982,8 @@ def train_pldm(args):
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         else:
-            print("Using FP16 mixed precision training")
-            amp_dtype = torch.float16
+            print("Using FP32 training")
+            amp_dtype = None
     else:
         print("Mixed precision not available, using FP32")
         amp_dtype = None
@@ -1281,42 +1226,61 @@ def train_pldm(args):
                 
                 # Convert batch data to tensors - always use float32 for loss computation tensors
                 # Autocast will handle the conversion to lower precision during forward pass
-                batch_log_probs_tensor = torch.tensor(batch_log_probs, dtype=torch.float32, device=device)
                 batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
-                
-                # Reset gradients
-                optimizer.zero_grad()
+
+                # We will compute log‑probs inside the dynamics loop to avoid
+                # encoding the same observation twice.
                 
                 # Use autocast for mixed precision training
                 with torch.amp.autocast('cuda', enabled=amp_dtype is not None, dtype=amp_dtype):
                     # Policy loss (policy gradient)
-                    policy_loss = -(batch_log_probs_tensor * batch_returns_tensor).mean()
-                    
-                    # Dynamics loss (JEPA objective)
+                    policy_log_probs = []
                     dynamics_loss = 0
                     next_state_loss = 0
                     on_the_same_page_loss = 0
+
                     for state, next_state, action, next_goal in zip(batch_states, batch_next_states, batch_actions, batch_next_goals):
                         # Encode current and next state
                         z_t = model.encode(state.unsqueeze(0))
                         z_next_actual = model.encode(next_state.unsqueeze(0))
-                        
+
+                        # Log‑prob of stored goal
+                        log_prob = model.next_goal_predictor.log_prob(z_t, next_goal.unsqueeze(0))
+                        policy_log_probs.append(log_prob.squeeze(0))
+
                         # Predict next state using dynamics model directly
                         a_t = action.unsqueeze(0)
                         z_next_pred = model.dynamics(z_t, a_t)
-                        
+
                         # Add to dynamics loss
                         dynamics_loss += F.mse_loss(z_next_pred, z_next_actual)
-                        next_state_loss += F.mse_loss(z_next_pred, z_next_actual)
-                        on_the_same_page_loss += F.mse_loss(next_goal, z_next_pred)
-                        
+
+                        # Conditional losses based on args
+                        if args.use_next_state_loss:
+                            next_state_loss += F.mse_loss(z_next_pred, z_next_actual)
+
+                        if args.use_same_page_loss:
+                            on_the_same_page_loss += F.mse_loss(next_goal, z_next_pred)
+
+                    batch_log_probs_tensor = torch.stack(policy_log_probs)
+                    policy_loss = -(batch_log_probs_tensor * batch_returns_tensor).mean()
+
                     if len(batch_states) > 0:
                         dynamics_loss = dynamics_loss / len(batch_states)
-                        next_state_loss = next_state_loss / len(batch_states)
-                        on_the_same_page_loss = on_the_same_page_loss / len(batch_states)
-                        
+                        if args.use_next_state_loss:
+                            next_state_loss = next_state_loss / len(batch_states)
+                        if args.use_same_page_loss:
+                            on_the_same_page_loss = on_the_same_page_loss / len(batch_states)
+
                     # Total loss
-                    loss = policy_loss + args.lambda_dynamics * (dynamics_loss + on_the_same_page_loss + next_state_loss)
+                    loss = policy_loss + args.lambda_dynamics * dynamics_loss
+                    
+                    # Add conditional losses
+                    if args.use_next_state_loss:
+                        loss += args.lambda_dynamics * next_state_loss
+                    
+                    if args.use_same_page_loss:
+                        loss += args.lambda_dynamics * on_the_same_page_loss
                 
                 # Backward pass with scaler for FP16 or regular backward for BF16/FP32
                 if amp_dtype == torch.float16:
@@ -1332,14 +1296,18 @@ def train_pldm(args):
                 # Update statistics
                 total_policy_loss += policy_loss.item() * valid_episodes
                 total_dynamics_loss += dynamics_loss.item() * valid_episodes
-                total_next_state_loss += next_state_loss.item() * valid_episodes
-                total_on_the_same_page_loss += on_the_same_page_loss.item() * valid_episodes
+                if args.use_next_state_loss:
+                    total_next_state_loss += next_state_loss.item() * valid_episodes
+                if args.use_same_page_loss:
+                    total_on_the_same_page_loss += on_the_same_page_loss.item() * valid_episodes
                 
                 # Log batch metrics
                 writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
                 writer.add_scalar('Loss/dynamics', dynamics_loss.item(), global_step)
-                writer.add_scalar('Loss/next_state', next_state_loss.item(), global_step)
-                writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
+                if args.use_next_state_loss:
+                    writer.add_scalar('Loss/next_state', next_state_loss.item(), global_step)
+                if args.use_same_page_loss:
+                    writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
                 writer.add_scalar('Loss/total', loss.item(), global_step)
                 writer.add_scalar('Reward/batch_mean', sum(batch_rewards)/len(batch_rewards), global_step)
                 
@@ -1352,14 +1320,23 @@ def train_pldm(args):
                 avg_reward = total_reward / num_episodes
                 avg_policy_loss = total_policy_loss / num_episodes
                 avg_dynamics_loss = total_dynamics_loss / num_episodes
-                avg_next_state_loss = total_next_state_loss / num_episodes
-                avg_on_the_same_page_loss = total_on_the_same_page_loss / num_episodes
-                print(f"Epoch {epoch+1}/{args.epochs} - "
-                      f"Avg Reward: {avg_reward:.4f}, "
-                      f"Avg Policy Loss: {avg_policy_loss:.4f}, "
-                      f"Avg Dynamics Loss: {avg_dynamics_loss:.4f}, "
-                      f"Avg Next State Loss: {avg_next_state_loss:.4f}, "
-                      f"Avg On the Same Page Loss: {avg_on_the_same_page_loss:.4f}")
+                
+                # Build performance report
+                report = f"Epoch {epoch+1}/{args.epochs} - " \
+                         f"Avg Reward: {avg_reward:.4f}, " \
+                         f"Avg Policy Loss: {avg_policy_loss:.4f}, " \
+                         f"Avg Dynamics Loss: {avg_dynamics_loss:.4f}"
+                
+                # Add conditional metrics to report
+                if args.use_next_state_loss:
+                    avg_next_state_loss = total_next_state_loss / num_episodes
+                    report += f", Avg Next State Loss: {avg_next_state_loss:.4f}"
+                
+                if args.use_same_page_loss:
+                    avg_on_the_same_page_loss = total_on_the_same_page_loss / num_episodes
+                    report += f", Avg On-Same-Page Loss: {avg_on_the_same_page_loss:.4f}"
+                
+                print(report)
                 
                 # Save best model
                 if avg_reward > best_reward:
@@ -1403,15 +1380,17 @@ def parse_args():
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--episodes_per_epoch', type=int, default=128, help='Number of episodes per epoch')
-    parser.add_argument('--batch_size', type=int, default=8, help='Number of trajectories to process in a batch')
+    parser.add_argument('--episodes_per_epoch', type=int, default=100, help='Number of episodes per epoch')
+    parser.add_argument('--batch_size', type=int, default=25, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=40, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lambda_dynamics', type=float, default=0.5, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=0.3, help='Weight for dynamics loss')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
-    parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
+    parser.add_argument('--num_workers', type=int, default=16, help='Number of parallel workers for episode collection')
+    parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
+    parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
+    parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
     
     # Optimizer parameters
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
@@ -1419,13 +1398,13 @@ def parse_args():
     parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
     
     # Precision parameters
-    parser.add_argument('--bf16', type=bool, default=True, help='Use BFloat16 mixed precision for training')
+    parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
     
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_large_model', help='Directory to save model and logs')
-    parser.add_argument('--resume', action='store_true', help='Resume training from checkpoint')
+    parser.add_argument('--output_dir', type=str, default='output_large_model3', help='Directory to save model and logs')
+    parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     
     return parser.parse_args()
 
