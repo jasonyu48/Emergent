@@ -56,20 +56,20 @@ def make_gif(frames, filename, fps=10):
     imageio.mimsave(filename, images, fps=fps)
 
 
-def visualize_trajectory(frames, goal_frames, dot_positions, target_position, wall_x, output_path):
-    """Visualize the trajectory with dot positions and goal frames"""
+def visualize_trajectory(frames, recon_frames, dot_positions, target_position, wall_x, output_path):
+    """Visualize the trajectory with dot positions and reconstruction frames"""
     # Create output directory if it doesn't exist
     output_dir = Path(output_path).parent
     output_dir.mkdir(exist_ok=True, parents=True)
     
     # Convert frames to numpy arrays for visualization
     frames_np = [frame.cpu().numpy() for frame in frames]
-    goal_frames_np = [frame.cpu().numpy() for frame in goal_frames]
+    recon_frames_np = [frame.cpu().numpy() for frame in recon_frames]
     
     # Create GIF frames
     plt_frames = []
     
-    for i, (frame, goal_frame) in enumerate(zip(frames_np, goal_frames_np)):
+    for i, (frame, recon_frame) in enumerate(zip(frames_np, recon_frames_np)):
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         
         # Plot current observation - normalize to [0,1] range for imshow
@@ -81,13 +81,13 @@ def visualize_trajectory(frames, goal_frames, dot_positions, target_position, wa
         axes[0].set_title(f"Current Observation (Step {i})")
         axes[0].axis('off')
         
-        # Plot goal prediction - normalize to [0,1] range for imshow
-        if goal_frame.max() > 1.0:
-            goal_frame_norm = goal_frame / 255.0
+        # Plot reconstruction
+        if recon_frame.max() > 1.0:
+            recon_norm = recon_frame / 255.0
         else:
-            goal_frame_norm = goal_frame
-        axes[1].imshow(goal_frame_norm.transpose(1, 2, 0))
-        axes[1].set_title(f"Goal Prediction (Step {i})")
+            recon_norm = recon_frame
+        axes[1].imshow(recon_norm.transpose(1, 2, 0))
+        axes[1].set_title(f"Reconstruction (Step {i})")
         axes[1].axis('off')
         
         # Plot trajectory
@@ -168,6 +168,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
     dot_positions = [env.dot_position.cpu().numpy()]
     rewards = []
     next_goals = []
+    reconstructions = []  # store decoded images
     
     # Set up dtype
     dtype = torch.bfloat16 if use_bf16 else torch.float32
@@ -205,6 +206,11 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
         if z_t.dtype != dtype:
             print(f"Warning: Encoded state z_t has dtype {z_t.dtype}, converting to {dtype}")
             z_t = z_t.to(dtype)
+        
+        # Decode reconstruction and store
+        with torch.no_grad():
+            recon_img = model.decode(z_t).squeeze(0).cpu()
+        reconstructions.append(recon_img)
     
     # Rollout loop
     done = False
@@ -221,7 +227,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
             if z_t.dtype != dtype:
                 z_t = z_t.to(dtype)
             
-            z_next, _ = model.predict_next_goal(z_t)
+            z_next, log_prob = model.predict_next_goal(z_t)
             
             # Ensure z_next has the correct dtype
             if z_next.dtype != dtype:
@@ -292,6 +298,11 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
             # Verify encoding dtype
             if z_t.dtype != dtype:
                 z_t = z_t.to(dtype)
+            
+            # Decode reconstruction for this new state
+            with torch.no_grad():
+                recon_img = model.decode(z_t).squeeze(0).cpu()
+            reconstructions.append(recon_img)
     
     # Calculate final distance
     final_distance = torch.norm(env.dot_position - env.target_position).item()
@@ -303,6 +314,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
         'dot_positions': dot_positions,
         'rewards': rewards,
         'next_goals': next_goals,
+        'reconstructions': reconstructions,
         'total_reward': episode_reward,
         'done': done,
         'length': len(states) - 1,
@@ -423,6 +435,7 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         dot_positions = result['dot_positions']
         rewards = result['rewards']
         next_goals = result['next_goals']
+        reconstructions = result['reconstructions']
         done = result['done']
         episode_reward = result['total_reward']
         final_distance = result['final_distance']
@@ -452,7 +465,7 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         
         visualize_trajectory(
             states_tensor,
-                goal_states,
+            reconstructions,
             dot_positions,
             target_position,
             env.wall_x.cpu().numpy(),
@@ -485,8 +498,8 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
-    parser.add_argument('--model_path', type=str, default='output_large_model3/checkpoint.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='test_output_large_model3_checkpoint', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_recon/checkpoint.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='test_output_recon', help='Directory to save test results')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to evaluate')

@@ -405,8 +405,7 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
       encoder.*  -> 'encoder'
       dynamics.* -> 'dynamics'
       next_goal_predictor.* -> 'predictor'
-      level1.*  -> 'level1'
-      level2.*  -> 'level2'
+      decoder.* -> 'decoder'
       otherwise -> 'other'
     """
     # Map param -> lr for quick lookup
@@ -434,10 +433,8 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
             comp = 'dynamics'
         elif name.startswith('next_goal_predictor'):
             comp = 'predictor'
-        elif name.startswith('level1'):
-            comp = 'level1'
-        elif name.startswith('level2'):
-            comp = 'level2'
+        elif name.startswith('decoder'):
+            comp = 'decoder'
 
         lr = param_lr.get(id(p), 0.0)
         grad_mean = p.grad.abs().mean().item()
@@ -517,7 +514,8 @@ def train_pldm(args):
     optimizer = optim.Adam([
         {'params': model.encoder.parameters(), 'lr': args.encoder_lr},
         {'params': model.dynamics.parameters(), 'lr': args.dynamics_lr},
-        {'params': model.next_goal_predictor.parameters(), 'lr': args.policy_lr}
+        {'params': model.next_goal_predictor.parameters(), 'lr': args.policy_lr},
+        {'params': model.decoder.parameters(), 'lr': args.decoder_lr}
     ])
     
     # Create learning rate schedulers
@@ -528,6 +526,7 @@ def train_pldm(args):
         encoder_lr = optimizer.param_groups[0]['lr']
         dynamics_lr = optimizer.param_groups[1]['lr']
         policy_lr = optimizer.param_groups[2]['lr']
+        decoder_lr = optimizer.param_groups[3]['lr']
         
         # # Apply encoder LR schedule: reduce to 1/3 after the first epoch
         # if epoch == 1:
@@ -541,8 +540,9 @@ def train_pldm(args):
         optimizer.param_groups[0]['lr'] = encoder_lr
         optimizer.param_groups[1]['lr'] = dynamics_lr
         optimizer.param_groups[2]['lr'] = policy_lr
+        optimizer.param_groups[3]['lr'] = decoder_lr
         
-        return encoder_lr, dynamics_lr, policy_lr
+        return encoder_lr, dynamics_lr, policy_lr, decoder_lr
     
     # Check if resume from checkpoint
     start_epoch = 0
@@ -599,18 +599,20 @@ def train_pldm(args):
             total_dynamics_loss = 0
             total_next_state_loss = 0
             total_on_the_same_page_loss = 0
+            total_reconstruction_loss = 0
             num_episodes = 0
             
             # Adjust learning rates for this epoch
-            encoder_lr, dynamics_lr, policy_lr = adjust_learning_rates(epoch)
+            encoder_lr, dynamics_lr, policy_lr, decoder_lr = adjust_learning_rates(epoch)
             
             # Log current learning rates
             print(f"Epoch {epoch+1}/{args.epochs} - Learning rates: Encoder={encoder_lr:.2e}, "
-                  f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}")
+                  f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Decoder={decoder_lr:.2e}")
                   
             writer.add_scalar('LearningRate/encoder', encoder_lr, epoch)
             writer.add_scalar('LearningRate/dynamics', dynamics_lr, epoch)
             writer.add_scalar('LearningRate/policy', policy_lr, epoch)
+            writer.add_scalar('LearningRate/decoder', decoder_lr, epoch)
             
             # Process episodes in batches
             progress_bar = tqdm(total=args.episodes_per_epoch, desc=f"Epoch {epoch+1}/{args.epochs}")
@@ -736,11 +738,18 @@ def train_pldm(args):
                     dynamics_loss = 0
                     next_state_loss = 0
                     on_the_same_page_loss = 0
+                    reconstruction_loss = 0
 
                     for state, next_state, action, next_goal in zip(batch_states, batch_next_states, batch_actions, batch_next_goals):
                         # Encode current and next state
                         z_t = model.encode(state.unsqueeze(0))
                         z_next_actual = model.encode(next_state.unsqueeze(0))
+
+                        # Decoder warm-up loss
+                        if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
+                            recon = model.decode(z_t)
+                            target_img = state.unsqueeze(0).float() / 255.0 if state.max() > 1.0 else state.unsqueeze(0).float()
+                            reconstruction_loss += F.mse_loss(recon, target_img)
 
                         # Log‑prob of stored goal
                         log_prob = model.next_goal_predictor.log_prob(z_t, next_goal.unsqueeze(0))
@@ -766,6 +775,8 @@ def train_pldm(args):
 
                     if len(batch_states) > 0:
                         dynamics_loss = dynamics_loss / len(batch_states)
+                        if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
+                            reconstruction_loss = reconstruction_loss / len(batch_states)
                         if args.use_next_state_loss:
                             next_state_loss = next_state_loss / len(batch_states)
                         if args.use_same_page_loss:
@@ -773,6 +784,8 @@ def train_pldm(args):
 
                     # Total loss
                     loss = policy_loss + args.lambda_dynamics * dynamics_loss
+                    if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
+                        loss += args.lambda_recon * reconstruction_loss
                     
                     # Add conditional losses
                     if args.use_next_state_loss:
@@ -801,6 +814,8 @@ def train_pldm(args):
                     total_next_state_loss += next_state_loss.item() * valid_episodes
                 if args.use_same_page_loss:
                     total_on_the_same_page_loss += on_the_same_page_loss.item() * valid_episodes
+                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
+                    total_reconstruction_loss += reconstruction_loss.item() * valid_episodes
                 
                 # Log batch metrics
                 writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
@@ -809,6 +824,8 @@ def train_pldm(args):
                     writer.add_scalar('Loss/next_state', next_state_loss.item(), global_step)
                 if args.use_same_page_loss:
                     writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
+                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
+                    writer.add_scalar('Loss/reconstruction', reconstruction_loss.item(), global_step)
                 writer.add_scalar('Loss/total', loss.item(), global_step)
                 writer.add_scalar('Reward/batch_mean', sum(batch_rewards)/len(batch_rewards), global_step)
                 
@@ -836,6 +853,10 @@ def train_pldm(args):
                 if args.use_same_page_loss:
                     avg_on_the_same_page_loss = total_on_the_same_page_loss / num_episodes
                     report += f", Avg On-Same-Page Loss: {avg_on_the_same_page_loss:.4f}"
+                
+                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
+                    avg_reconstruction_loss = total_reconstruction_loss / num_episodes
+                    report += f", Avg Reconstruction Loss: {avg_reconstruction_loss:.4f}"
                 
                 print(report)
                 
@@ -886,17 +907,21 @@ def parse_args():
     parser.add_argument('--max_steps_per_episode', type=int, default=40, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lambda_dynamics', type=float, default=1000, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1000.0, help='Weight for dynamics loss')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=16, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
     parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
+    parser.add_argument('--use_decoder_loss', type=bool, default=True, help='Enable decoder reconstruction warm-up loss')
+    parser.add_argument('--warmup_epochs_decoder', type=int, default=15, help='Number of epochs to train decoder')
+    parser.add_argument('--lambda_recon', type=float, default=100000.0, help='Weight for reconstruction loss during warm-up')
     
     # Optimizer parameters
-    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-4, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-5, help='Learning rate for policy')
+    parser.add_argument('--encoder_lr', type=float, default=5e-4, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=5e-3, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=5e-4, help='Learning rate for policy')
+    parser.add_argument('--decoder_lr', type=float, default=5e-3, help='Learning rate for decoder')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
@@ -904,7 +929,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_large_model3', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_recon', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     
     return parser.parse_args()

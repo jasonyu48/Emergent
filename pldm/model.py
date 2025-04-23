@@ -314,6 +314,46 @@ class NextGoalPredictor(nn.Module):
         return dist.log_prob(z_sample).sum(dim=-1)
 
 
+class Decoder(nn.Module):
+    """Decoder that reconstructs a 64x64 RGB image from a 32-dim latent.
+
+    Architecture: FC -> 4x4x256 feature map -> series of ConvTranspose2d
+    layers doubling spatial resolution until 64x64, followed by 3-channel
+    convolution and Sigmoid.
+    """
+
+    def __init__(self, encoding_dim: int, img_size: int = 64, out_channels: int = 3):
+        super().__init__()
+
+        assert img_size == 64, "Decoder currently supports img_size=64 only"
+
+        self.fc = nn.Sequential(
+            nn.Linear(encoding_dim, 4 * 4 * 256),
+            nn.GELU(),
+        )
+
+        # Upsampling pathway: 4×4 → 8×8 → 16×16 → 32×32 → 64×64
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # 8×8
+            nn.GELU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),   # 16×16
+            nn.GELU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),    # 32×32
+            nn.GELU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),    # 64×64
+            nn.GELU(),
+            nn.Conv2d(16, out_channels, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid(),  # final pixel values in [0,1]
+        )
+
+    def forward(self, z):
+        # z: [B, latent_dim]
+        x = self.fc(z)                       # [B, 4*4*256]
+        x = x.view(-1, 256, 4, 4)           # [B, 256, 4, 4]
+        x = self.deconv(x)                  # [B, 3, 64, 64]
+        return x
+
+
 class PLDMModel(nn.Module):
     """Complete PLDM model with encoder, dynamics model, and next-goal predictor"""
     
@@ -346,6 +386,15 @@ class PLDMModel(nn.Module):
             encoding_dim=encoding_dim,
             hidden_dim=hidden_dim
         )
+        
+        # Decoder only used during warm-up epochs to prevent encoder collapse
+        self.decoder = Decoder(
+            encoding_dim=encoding_dim,
+            img_size=img_size,
+            out_channels=in_channels,
+        )
+        
+        self.img_size = img_size
         
         self.encoding_dim = encoding_dim
         self.action_dim = action_dim
@@ -499,6 +548,9 @@ class PLDMModel(nn.Module):
         # Count next goal predictor parameters
         predictor_params = sum(p.numel() for p in self.next_goal_predictor.parameters())
         
+        # Count decoder parameters
+        decoder_params = sum(p.numel() for p in self.decoder.parameters())
+        
         # Count total parameters
         total_params = sum(p.numel() for p in self.parameters())
         
@@ -507,6 +559,7 @@ class PLDMModel(nn.Module):
         print(f"Encoder: {encoder_params:,} parameters")
         print(f"Dynamics Model: {dynamics_params:,} parameters")
         print(f"Next Goal Predictor: {predictor_params:,} parameters")
+        print(f"Decoder: {decoder_params:,} parameters")
         print(f"Total: {total_params:,} parameters")
         
         # Print percentage breakdown
@@ -514,10 +567,16 @@ class PLDMModel(nn.Module):
         print(f"Encoder: {encoder_params/total_params*100:.1f}%")
         print(f"Dynamics Model: {dynamics_params/total_params*100:.1f}%")
         print(f"Next Goal Predictor: {predictor_params/total_params*100:.1f}%")
+        print(f"Decoder: {decoder_params/total_params*100:.1f}%")
         
         return {
             "encoder": encoder_params,
             "dynamics": dynamics_params,
             "predictor": predictor_params,
+            "decoder": decoder_params,
             "total": total_params
-        } 
+        }
+
+    def decode(self, z):
+        """Reconstruct observation from latent."""
+        return self.decoder(z) 
