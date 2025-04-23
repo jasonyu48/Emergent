@@ -362,7 +362,7 @@ class PLDMModel(nn.Module):
         """Predict next state given current encoded state and action"""
         return self.dynamics(z_t, a_t)
     
-    def search_action(self, z_t, z_target, verbose=False, max_step_norm=15, num_samples=500):
+    def search_action(self, z_t, z_target, verbose=False, max_step_norm=15, num_samples=100):
         """Search for the action that leads from z_t to z_target using parallel sampling"""
         # Keep track of device and dtype
         dtype = z_t.dtype
@@ -379,25 +379,40 @@ class PLDMModel(nn.Module):
         # Ensure inputs are detached to avoid gradient tracking
         z_t = z_t.detach()
         z_target = z_target.detach()
-        
-        # Expand z_t to match the number of sampled actions
-        # Shape: [batch_size, encoding_dim] -> [batch_size, num_samples, encoding_dim]
+
+        # ------------------------------------------------------------------
+        # Quadrant‑based sampling instead of full‑space sampling
+        # ------------------------------------------------------------------
+        # We first pick one of the four quadrants of the 2‑D action space and
+        # then sample **at most** 100 actions uniformly inside that quadrant.
+        # This adds structured randomness that has proven useful for training
+        # the dynamics model while keeping the search budget low.
+        # ------------------------------------------------------------------
+
+        # Pick a random quadrant (0:(+,+), 1:(+,-), 2:(-,+), 3:(-,-))
+        quadrant = torch.randint(0, 4, (1,), device=device).item()
+        sign_x = 1.0 if quadrant in (0, 1) else -1.0  # Q0 & Q1 have +x
+        sign_y = 1.0 if quadrant in (0, 2) else -1.0  # Q0 & Q2 have +y
+
+        # Sample actions uniformly in [0, max_step_norm] then assign signs
+        sampled_actions = (
+            torch.rand(batch_size, num_samples, self.action_dim,
+                       device=device, dtype=dtype) * max_step_norm
+        )
+        sampled_actions[..., 0] *= sign_x
+        sampled_actions[..., 1] *= sign_y
+
+        # Expand z_t / z_target to match the sampled actions
         expanded_z_t = z_t.unsqueeze(1).expand(-1, num_samples, -1)
-        # Reshape to [batch_size * num_samples, encoding_dim] for batch processing
-        expanded_z_t = expanded_z_t.reshape(-1, z_t.shape[-1])
-        
-        # Similarly expand z_target
         expanded_z_target = z_target.unsqueeze(1).expand(-1, num_samples, -1)
+
+        # Reshape expanded states to 2‑D [batch_size*num_samples, encoding_dim]
+        expanded_z_t = expanded_z_t.reshape(-1, z_t.shape[-1])
         expanded_z_target = expanded_z_target.reshape(-1, z_target.shape[-1])
-        
-        # Sample actions uniformly within the allowed action space
-        # Shape: [batch_size, num_samples, action_dim]
-        sampled_actions = torch.rand(batch_size, num_samples, self.action_dim, device=device, dtype=dtype) 
-        sampled_actions = sampled_actions * 2 * max_step_norm - max_step_norm  # Scale to [-max_step_norm, max_step_norm]
-        
-        # Reshape actions to [batch_size * num_samples, action_dim] for batch processing
+
+        # Reshape actions to 2‑D [batch_size*num_samples, action_dim]
         flat_actions = sampled_actions.reshape(-1, self.action_dim)
-        
+
         # Forward pass through dynamics model to get predicted next states
         with torch.no_grad():
             # Predict next states for all sampled actions in a single forward pass

@@ -641,7 +641,7 @@ def compute_advantages(rewards, values, gamma=0.99, lambda_=0.95):
     return advantages
 
 
-def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=500):
+def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100):
     """Perform a single rollout in the environment using the PLDM model"""
     # Reset environment
     obs, info = env.reset()
@@ -824,7 +824,7 @@ class ParallelEpisodeCollector:
     """Collect episodes in parallel for faster training"""
     
     def __init__(self, model, env_creator, max_steps, device, bf16_supported, 
-                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, num_samples=500):
+                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, num_samples=100):
         """
         Initialize parallel episode collector
         
@@ -1257,7 +1257,8 @@ def train_pldm(args):
 
                         # Conditional losses based on args
                         if args.use_next_state_loss:
-                            next_state_loss += F.mse_loss(z_next_pred, z_next_actual)
+                            next_state_loss += 0 # not implemented yet
+                            print("Next state loss is not implemented yet")
 
                         if args.use_same_page_loss:
                             on_the_same_page_loss += F.mse_loss(next_goal, z_next_pred)
@@ -1380,12 +1381,12 @@ def parse_args():
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--episodes_per_epoch', type=int, default=100, help='Number of episodes per epoch')
-    parser.add_argument('--batch_size', type=int, default=25, help='Number of trajectories to process in a batch')
+    parser.add_argument('--episodes_per_epoch', type=int, default=128, help='Number of episodes per epoch')
+    parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=40, help='Maximum steps per episode')
-    parser.add_argument('--num_samples', type=int, default=500, help='Number of action samples to evaluate in parallel')
+    parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lambda_dynamics', type=float, default=0.3, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=0.5, help='Weight for dynamics loss')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=16, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')

@@ -311,7 +311,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
     }
 
 
-def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=500, use_bf16=False, max_step_norm=15, encoder_embedding=256):
+def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=256):
     """Evaluate the trained model on the DotWall environment"""
     # Create output directory
     output_dir = Path(output_dir)
@@ -366,7 +366,7 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         # Use the model's to() method to properly convert all parameters and buffers
         model = model.to(torch.bfloat16)
         print("Converted model to BFloat16")
-    
+        
         # Verify model is in BFloat16 mode by checking parameter dtype
         sample_param = next(model.parameters())
         print(f"Model parameters dtype: {sample_param.dtype}")
@@ -491,7 +491,7 @@ def parse_args():
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to evaluate')
     parser.add_argument('--max_steps', type=int, default=40, help='Maximum steps per episode')
-    parser.add_argument('--num_samples', type=int, default=500, help='Number of action samples to evaluate in parallel')
+    parser.add_argument('--num_samples', type=int, default=100, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 precision for evaluation')
     parser.add_argument('--encoder_embedding', type=int, default=256, help='Dimension of encoder embedding')
