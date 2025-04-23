@@ -8,6 +8,7 @@ from pathlib import Path
 import imageio
 from torchvision import transforms as T
 from PIL import Image
+import torch.nn as nn
 
 from pldm_envs.wall.wall import DotWall
 from pldm.model import PLDMModel
@@ -144,15 +145,16 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
-    parser.add_argument('--model_path', type=str, default='output3/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='test_output4', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_large_model/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='test_output_large_model', help='Directory to save test results')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to evaluate')
     parser.add_argument('--max_steps', type=int, default=40, help='Maximum steps per episode')
-    parser.add_argument('--search_steps', type=int, default=60, help='Number of steps for action search')
+    parser.add_argument('--num_samples', type=int, default=500, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--bf16', action='store_true', help='Use BFloat16 precision for evaluation')
+    parser.add_argument('--encoder_embedding', type=int, default=256, help='Dimension of encoder embedding')
     
     return parser.parse_args()
 
@@ -180,7 +182,195 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     return distance_reward + same_room_bonus
 
 
-def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, search_steps=10, use_bf16=False, max_step_norm=12.25):
+def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_step_norm):
+    """Roll out a single episode using the model with parallel action search"""
+    # Reset environment
+    obs, info = env.reset()
+    
+    # Initialize trajectory data
+    states = [obs]
+    actions = []
+    dot_positions = [env.dot_position.cpu().numpy()]
+    rewards = []
+    next_goals = []
+    
+    # Set up dtype
+    dtype = torch.bfloat16 if use_bf16 else torch.float32
+    
+    # Verify model is using the correct dtype
+    sample_param = next(model.parameters())
+    expected_dtype = torch.bfloat16 if use_bf16 else torch.float32
+    if sample_param.dtype != expected_dtype:
+        print(f"Warning: Model parameters have dtype {sample_param.dtype}, but expected {expected_dtype}")
+        print("Converting model to the correct dtype")
+        model = model.to(dtype)
+        # Verify conversion was successful
+        sample_param = next(model.parameters())
+        print(f"Model parameters dtype after conversion: {sample_param.dtype}")
+    
+    # Encode initial state
+    with torch.no_grad():
+        if isinstance(obs, torch.Tensor):
+            obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+        else:
+            obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+        
+        # Ensure batch size is 1
+        if obs_tensor.shape[0] != 1:
+            obs_tensor = obs_tensor[:1]
+            
+        # Verify tensor dtype before passing to model
+        if obs_tensor.dtype != dtype:
+            print(f"Warning: Input tensor dtype {obs_tensor.dtype} doesn't match expected {dtype}")
+            obs_tensor = obs_tensor.to(dtype)
+            
+        z_t = model.encode(obs_tensor)
+        
+        # Verify encoding dtype
+        if z_t.dtype != dtype:
+            print(f"Warning: Encoded state z_t has dtype {z_t.dtype}, converting to {dtype}")
+            z_t = z_t.to(dtype)
+    
+    # Rollout loop
+    done = False
+    truncated = False
+    episode_reward = 0
+    
+    for step in range(max_steps):
+        if done or truncated:
+            break
+        
+        try:
+            # Predict next goal
+            with torch.no_grad():
+                # Ensure z_t has the correct dtype
+                if z_t.dtype != dtype:
+                    z_t = z_t.to(dtype)
+                
+                z_next, _ = model.predict_next_goal(z_t)
+                
+                # Ensure z_next has the correct dtype
+                if z_next.dtype != dtype:
+                    print(f"Warning: z_next has dtype {z_next.dtype}, converting to {dtype}")
+                    z_next = z_next.to(dtype)
+                    
+                next_goals.append(z_next.cpu().numpy())
+            
+            # Search for action
+            with torch.no_grad():
+                a_t = model.search_action(
+                    z_t.detach().to(dtype),  # Ensure correct dtype
+                    z_next.detach().to(dtype),  # Ensure correct dtype
+                    num_samples=num_samples,
+                    max_step_norm=max_step_norm,
+                    verbose=(step == 0)  # Verbose only on first step
+                )
+                
+                # Ensure action has the correct dtype
+                if a_t.dtype != dtype:
+                    print(f"Warning: Action a_t has dtype {a_t.dtype}, converting to {dtype}")
+                    a_t = a_t.to(dtype)
+            
+            # Take action in environment
+            # Convert to float32 for CPU numpy operations, regardless of model dtype
+            action = a_t.to(torch.float32).cpu().numpy()[0]
+            obs, reward, done, truncated, info = env.step(action)
+            episode_reward += reward
+            
+            # Store trajectory data
+            states.append(obs)
+            actions.append(action)
+            dot_positions.append(env.dot_position.cpu().numpy())
+            rewards.append(reward)
+            
+            # Update encoding
+            with torch.no_grad():
+                if isinstance(obs, torch.Tensor):
+                    obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+                else:
+                    obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+                
+                # Ensure batch size is 1
+                if obs_tensor.shape[0] != 1:
+                    obs_tensor = obs_tensor[:1]
+                
+                # Verify tensor dtype before passing to model
+                if obs_tensor.dtype != dtype:
+                    obs_tensor = obs_tensor.to(dtype)
+                    
+                z_t = model.encode(obs_tensor)
+                
+                # Verify encoding dtype
+                if z_t.dtype != dtype:
+                    z_t = z_t.to(dtype)
+                
+        except Exception as e:
+            print(f"Error in rollout step {step}: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Show type information for debugging
+            print(f"Model parameters dtype: {next(model.parameters()).dtype}")
+            if 'z_t' in locals():
+                print(f"z_t shape: {z_t.shape}, dtype: {z_t.dtype}")
+            if 'z_next' in locals():
+                print(f"z_next shape: {z_next.shape}, dtype: {z_next.dtype}")
+            if 'a_t' in locals():
+                print(f"a_t shape: {a_t.shape}, dtype: {a_t.dtype}")
+            
+            # Try to recover with random action
+            a_t = torch.randn(1, 2, device=device).to(dtype)
+            action = a_t.to(torch.float32).cpu().numpy()[0]
+            
+            try:
+                obs, reward, done, truncated, info = env.step(action)
+                episode_reward += reward
+                states.append(obs)
+                actions.append(action)
+                dot_positions.append(env.dot_position.cpu().numpy())
+                rewards.append(reward)
+                
+                with torch.no_grad():
+                    if isinstance(obs, torch.Tensor):
+                        obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+                    else:
+                        obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+                    
+                    if obs_tensor.shape[0] != 1:
+                        obs_tensor = obs_tensor[:1]
+                    
+                    # Ensure correct dtype
+                    if obs_tensor.dtype != dtype:
+                        obs_tensor = obs_tensor.to(dtype)
+                        
+                    z_t = model.encode(obs_tensor)
+                    
+                    # Verify encoding dtype
+                    if z_t.dtype != dtype:
+                        z_t = z_t.to(dtype)
+            except Exception as nested_e:
+                print(f"Failed to recover with random action: {nested_e}")
+                break
+    
+    # Calculate final distance
+    final_distance = torch.norm(env.dot_position - env.target_position).item()
+    same_room = (env.dot_position[0] < (env.wall_x - env.wall_width//2)) == (env.target_position[0] < (env.wall_x - env.wall_width//2))
+    
+    return {
+        'states': states,
+        'actions': actions,
+        'dot_positions': dot_positions,
+        'rewards': rewards,
+        'next_goals': next_goals,
+        'total_reward': episode_reward,
+        'done': done,
+        'length': len(states) - 1,
+        'final_distance': final_distance,
+        'same_room': same_room
+    }
+
+
+def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=500, use_bf16=False, max_step_norm=12.25, encoder_embedding=256):
     """Evaluate the trained model on the DotWall environment"""
     # Create output directory
     output_dir = Path(output_dir)
@@ -215,8 +405,12 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         in_channels=3,
         encoding_dim=32,  # Updated to match training default
         action_dim=2,
-        hidden_dim=256    # Updated to match training default
+        hidden_dim=512,    # Updated to match new architecture
+        encoder_embedding=encoder_embedding  # Use encoder_embedding parameter
     ).to(device)
+    
+    # Print model parameter counts
+    model.print_parameter_count()
     
     # Load state dict
     if 'model_state_dict' in checkpoint:
@@ -228,29 +422,41 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
     
     # Convert model to bf16 if supported
     if bf16_supported:
+        # Use the model's to() method to properly convert all parameters and buffers
         model = model.to(torch.bfloat16)
         print("Converted model to BFloat16")
-    
-    # Print model parameter norms to check if they're reasonable
-    total_params = 0
-    print("\nModel summary:")
-    
-    # Check encoder parameters
-    encoder_params = sum(p.numel() for p in model.encoder.parameters())
-    dynamics_params = sum(p.numel() for p in model.dynamics.parameters())
-    
-    print(f"Encoder: {encoder_params} parameters")
-    print(f"Dynamics: {dynamics_params} parameters")
-    
-    # Calculate total parameters
-    for param in model.parameters():
-        if param.requires_grad:
-            total_params += param.numel()
-    print(f"Total trainable parameters: {total_params}")
+        
+        # Verify model is in BFloat16 mode by checking parameter dtype
+        sample_param = next(model.parameters())
+        print(f"Model parameters dtype: {sample_param.dtype}")
+        
+        # Verify all components of the model are in BFloat16
+        sample_encoder_param = next(model.encoder.parameters())
+        sample_dynamics_param = next(model.dynamics.parameters())
+        sample_goal_param = next(model.next_goal_predictor.parameters())
+        
+        print(f"Encoder parameters dtype: {sample_encoder_param.dtype}")
+        print(f"Dynamics parameters dtype: {sample_dynamics_param.dtype}")
+        print(f"NextGoalPredictor parameters dtype: {sample_goal_param.dtype}")
+        
+        # Explicitly check and convert Conv2d biases
+        for module in model.modules():
+            if isinstance(module, nn.Conv2d) and module.bias is not None:
+                if module.bias.dtype != torch.bfloat16:
+                    print(f"Converting Conv2d bias from {module.bias.dtype} to BFloat16")
+                    module.bias = nn.Parameter(module.bias.to(torch.bfloat16))
+                else:
+                    print(f"Conv2d bias already in BFloat16")
+                    
+        # Verify conversion one more time
+        for module in model.encoder.modules():
+            if isinstance(module, nn.Conv2d) and module.bias is not None:
+                print(f"Final Conv2d bias check - dtype: {module.bias.dtype}")
+                break
     
     # Set model to evaluation mode
     model.eval()
-    print("Model set to evaluation mode")
+    print("Using parallel action search with", num_samples, "samples per step")
     
     # Evaluate model for multiple episodes
     success_count = 0
@@ -260,121 +466,36 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         print(f"\nEpisode {episode+1}/{num_episodes}")
         
         try:
-            # Reset environment
-            obs, info = env.reset()
+            # Run the episode using our rollout function
+            result = rollout_episode(
+                model=model,
+                env=env,
+                max_steps=max_steps,
+                num_samples=num_samples,
+                device=device,
+                use_bf16=bf16_supported,
+                max_step_norm=max_step_norm
+            )
             
-            # Initialize trajectory data
-            states = [obs]
-            actions = []
-            dot_positions = [env.dot_position.cpu().numpy()]
-            goal_states = []
-            rewards = []
+            # Extract data from result
+            states = result['states']
+            actions = result['actions']
+            dot_positions = result['dot_positions']
+            rewards = result['rewards']
+            next_goals = result['next_goals']
+            done = result['done']
+            episode_reward = result['total_reward']
+            final_distance = result['final_distance']
+            same_room = result['same_room']
             
-            # Get initial encoding
-            with torch.no_grad():
-                # Get appropriate dtype
-                dtype = torch.bfloat16 if bf16_supported else torch.float32
-                
-                if isinstance(obs, torch.Tensor):
-                    obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
-                else:
-                    obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
-                
-                z_t = model.encode(obs_tensor)
-            
-            # Rollout loop
-            done = False
-            truncated = False
-            
-            for step in range(max_steps):
-                if done or truncated:
-                    break
-                
-                # Predict next goal
-                with torch.no_grad():
-                    z_next, transition_loss = model.predict_next_goal(z_t)
-                    
-                    # Ensure tensors are detached for action search
-                    z_t_detached = z_t.clone().detach()
-                    z_next_detached = z_next.clone().detach()
-                    
-                    # Search for action to reach predicted next goal
-                    try:
-                        # Enable verbose mode for better debugging
-                        verbose = False  # Set verbose to False to reduce output
-                        
-                        a_t = model.search_action(
-                            z_t_detached, 
-                            z_next_detached, 
-                            num_steps=search_steps,
-                            verbose=verbose,
-                            max_step_norm=max_step_norm  # Pass the max_step_norm to constrain initial actions
-                        )
-                    except Exception as e:
-                        print(f"Error in search_action: {e}")
-                        # Fallback to a random action if search fails
-                        a_t = torch.randn(z_t.shape[0], 2, device=device)
-                        if bf16_supported:
-                            a_t = a_t.to(torch.bfloat16)
-                        print("Using fallback random action")
-                
-                # Take action in environment
-                # Convert to float32 before converting to NumPy since NumPy doesn't support bfloat16
-                action = a_t.to(torch.float32).cpu().numpy()[0]
-                obs, env_reward, done, truncated, info = env.step(action)
-                
-                # Calculate custom reward (like during training)
-                dot_position = env.dot_position.unsqueeze(0)
-                target_position = env.target_position.unsqueeze(0)
-                custom_reward = calculate_distance_reward(
-                    dot_position, 
-                    target_position, 
-                    env.wall_x,
-                    env.wall_width
-                ).item()
-                
-                # Store trajectory data
-                states.append(obs)
-                actions.append(action)
-                dot_positions.append(env.dot_position.cpu().numpy())
-                rewards.append(custom_reward)  # Use custom reward
-                
-                # Print step-level information every 10 steps
-                if step % 10 == 0 or step == max_steps-1:
-                    distance = torch.norm(dot_position - target_position).item()
-                    print(f"  Step {step}: Distance: {distance:.2f}, Reward: {custom_reward:.2f}")
-                
-                # Store goal prediction visualization
-                # Create a fake observation with the goal position
-                if isinstance(obs, torch.Tensor):
-                    goal_obs = torch.zeros_like(obs.to(dtype=torch.float32))
-                else:
-                    goal_obs = torch.zeros_like(torch.tensor(obs, dtype=torch.float32))
-                
-                # Reconstruct the goal state (this is just for visualization)
-                goal_states.append(goal_obs)
-                
-                # Update current encoding
-                with torch.no_grad():
-                    if isinstance(obs, torch.Tensor):
-                        obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
-                    else:
-                        obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
-                    
-                    z_t = model.encode(obs_tensor)
-            
-            # Compute total reward
-            total_reward = sum(rewards)
-            total_rewards.append(total_reward)
-            
-            # Check if episode was successful
+            # Count success
             if done:
                 success_count += 1
             
-            # Calculate final distance to target
-            final_distance = torch.norm(env.dot_position - env.target_position).item()
+            # Track rewards
+            total_rewards.append(episode_reward)
             
-            # Convert states to tensors
+            # Create visualization frames for states and goals
             states_tensor = []
             for s in states:
                 if isinstance(s, torch.Tensor):
@@ -382,27 +503,28 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
                 else:
                     states_tensor.append(torch.from_numpy(s).float())
                 
-            # Goal states are already tensors as we created them that way
-            goal_states_tensor = goal_states
+            # For visualization - create empty goal tensors (same shape as state)
+            if len(states_tensor) > 0:
+                goal_states = [torch.zeros_like(states_tensor[0]) for _ in range(len(states_tensor)-1)]
+                
+                # Visualize trajectory
+                target_position = env.target_position.cpu().numpy()
+                
+                visualize_trajectory(
+                    states_tensor,
+                    goal_states,
+                    dot_positions,
+                    target_position,
+                    env.wall_x.cpu().numpy(),
+                    output_dir / f"episode_{episode+1}.gif"
+                )
             
-            # Visualize trajectory
-            target_position = env.target_position.cpu().numpy()
-            
-            visualize_trajectory(
-                states_tensor,
-                goal_states_tensor,
-                dot_positions,
-                target_position,
-                env.wall_x.cpu().numpy(),
-                output_dir / f"episode_{episode+1}.gif"
-            )
-            
+            # Print episode summary
             print(f"\nEpisode {episode+1} summary:")
-            print(f"  Length: {len(states)-1} steps")
+            print(f"  Length: {result['length']} steps")
             print(f"  Success: {done}")
             print(f"  Final distance to target: {final_distance:.4f}")
-            print(f"  Custom reward total: {total_reward:.2f}")
-            same_room = (env.dot_position[0] < (env.wall_x - env.wall_width//2)) == (env.target_position[0] < (env.wall_x - env.wall_width//2))
+            print(f"  Reward total: {episode_reward:.2f}")
             print(f"  In same room as target: {same_room}")
             
         except Exception as e:
@@ -418,8 +540,7 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         
         print(f"\nOverall performance:")
         print(f"  Success rate: {success_rate:.2f} ({success_count}/{num_episodes})")
-        print(f"  Average custom reward: {avg_reward:.2f}")
-        print(f"  Note: Custom rewards include distance penalties and same-room bonuses")
+        print(f"  Average reward: {avg_reward:.2f}")
         
         return success_rate, avg_reward
     else:
@@ -435,7 +556,8 @@ if __name__ == '__main__':
         device=args.device,
         num_episodes=args.num_episodes,
         max_steps=args.max_steps,
-        search_steps=args.search_steps,
+        num_samples=args.num_samples,
         use_bf16=args.bf16,
-        max_step_norm=args.max_step_norm
+        max_step_norm=args.max_step_norm,
+        encoder_embedding=args.encoder_embedding
     ) 

@@ -12,9 +12,10 @@ class ViTEncoder(nn.Module):
         img_size=64,
         patch_size=8,
         in_channels=3,
-        embedding_dim=128,
-        num_heads=4,
-        num_layers=4,
+        embedding_dim=512,
+        encoding_dim=32,
+        num_heads=8,
+        num_layers=3,
         mlp_ratio=4,
         dropout=0.1
     ):
@@ -22,6 +23,7 @@ class ViTEncoder(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.embedding_dim = embedding_dim
+        self.encoding_dim = encoding_dim
         
         # Calculate number of patches
         self.num_patches = (img_size // patch_size) ** 2
@@ -46,24 +48,47 @@ class ViTEncoder(nn.Module):
             nhead=num_heads,
             dim_feedforward=embedding_dim * mlp_ratio,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
         # Layer normalization
         self.ln = nn.LayerNorm(embedding_dim)
         
+        # Projection head to reduce dimension from embedding_dim to encoding_dim
+        self.projection = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim // 4),
+            nn.GELU(),
+            nn.Linear(embedding_dim // 4, encoding_dim)
+        )
+        
+        # Final layer norm for encoded representation
+        self.final_ln = nn.LayerNorm(encoding_dim)
+        
         # Initialize weights
         self.apply(self._init_weights)
     
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=0.02)
+            # Use Kaiming initialization for linear layers
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Conv2d):
+            # Use Kaiming initialization for convolutional layers
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
         elif isinstance(m, nn.LayerNorm):
+            # Initialize LayerNorm as before
             nn.init.zeros_(m.bias)
             nn.init.ones_(m.weight)
+        # Special initialization for ViT specific parameters
+        elif isinstance(m, ViTEncoder):
+            # Initialize position embeddings
+            nn.init.trunc_normal_(m.pos_embedding, std=0.02)
+            # Initialize class token
+            nn.init.trunc_normal_(m.cls_token, std=0.02)
     
     def forward(self, x):
         batch_size = x.shape[0]
@@ -87,30 +112,61 @@ class ViTEncoder(nn.Module):
         # Apply layer norm
         x = self.ln(x)
         
-        # Return cls token embedding
-        return x[:, 0]
+        # Get cls token embedding
+        cls_embedding = x[:, 0]
+        
+        # Project from embedding_dim to encoding_dim
+        encoding = self.projection(cls_embedding)
+        
+        # Apply final layer normalization
+        encoding = self.final_ln(encoding)
+        
+        return encoding
 
 
 class DynamicsModel(nn.Module):
     """MLP Dynamics Model that predicts next encoded state given current encoded state and action"""
     
-    def __init__(self, encoding_dim, action_dim=2, hidden_dim=256, num_layers=3):
+    def __init__(self, encoding_dim, action_dim=2, hidden_dim=512, num_layers=6):
         super().__init__()
         
         self.encoding_dim = encoding_dim
         self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
         
-        # Build MLP layers
-        layers = []
-        input_dim = encoding_dim + action_dim
+        # Input projection layer
+        self.input_proj = nn.Linear(encoding_dim + action_dim, hidden_dim)
+        self.input_activation = nn.GELU()
         
-        for i in range(num_layers - 1):
-            layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
-            layers.append(nn.ReLU())
+        # Build residual blocks
+        self.residual_blocks = nn.ModuleList()
+        for _ in range((num_layers - 2) // 2):  # Each residual block has 2 linear layers
+            block = nn.ModuleList([
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU()
+            ])
+            self.residual_blocks.append(block)
         
-        layers.append(nn.Linear(hidden_dim, encoding_dim))
+        # Output projection
+        self.output_proj = nn.Linear(hidden_dim, encoding_dim)
         
-        self.mlp = nn.Sequential(*layers)
+        # Layer norm for residual connections
+        self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(len(self.residual_blocks))])
+        
+        # Initialize weights using Kaiming initialization
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
     
     def forward(self, z_t, a_t):
         """
@@ -123,19 +179,31 @@ class DynamicsModel(nn.Module):
         Returns:
             Predicted next latent state z_{t+1}
         """
-        # Ensure input tensors have proper requires_grad setting
-        # z_t typically doesn't need gradients when searching for actions
-        # a_t needs gradients when searching for actions
-        
-        # Concatenate encoded state and action
-        # Make sure they're on the same device and have the same dtype
+        # Ensure input tensors have proper dtype
         if a_t.dtype != z_t.dtype:
             a_t = a_t.to(dtype=z_t.dtype)
             
+        # Concatenate encoded state and action
         x = torch.cat([z_t, a_t], dim=-1)
         
-        # Apply MLP - this will maintain gradient flow if inputs require grad
-        z_next = self.mlp(x)
+        # Apply input projection
+        x = self.input_proj(x)
+        x = self.input_activation(x)
+        
+        # Apply residual blocks
+        for i, (block, layer_norm) in enumerate(zip(self.residual_blocks, self.layer_norms)):
+            # Save input for residual connection
+            residual = x
+            
+            # Apply block layers
+            for layer in block:
+                x = layer(x)
+            
+            # Add residual connection and normalize
+            x = layer_norm(x + residual)
+        
+        # Apply output projection
+        z_next = self.output_proj(x)
         
         return z_next
 
@@ -143,30 +211,70 @@ class DynamicsModel(nn.Module):
 class NextGoalPredictor(nn.Module):
     """MLP that predicts next goal state given current encoded state"""
     
-    def __init__(self, encoding_dim, hidden_dim=256, num_layers=3):
+    def __init__(self, encoding_dim, hidden_dim=512, num_layers=6):
         super().__init__()
         
         self.encoding_dim = encoding_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
         
-        # Build MLP layers
-        layers = []
+        # Input projection layer
+        self.input_proj = nn.Linear(encoding_dim, hidden_dim)
+        self.input_activation = nn.GELU()
         
-        for i in range(num_layers - 1):
-            layers.append(nn.Linear(encoding_dim if i == 0 else hidden_dim, hidden_dim))
-            layers.append(nn.ReLU())
+        # Build residual blocks
+        self.residual_blocks = nn.ModuleList()
+        for _ in range((num_layers - 2) // 2):  # Each residual block has 2 linear layers
+            block = nn.ModuleList([
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU()
+            ])
+            self.residual_blocks.append(block)
         
-        layers.append(nn.Linear(hidden_dim, encoding_dim))
+        # Output projection to features
+        self.output_proj = nn.Linear(hidden_dim, encoding_dim)
         
-        self.mlp = nn.Sequential(*layers)
+        # Layer norm for residual connections
+        self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(len(self.residual_blocks))])
         
         # For stochastic policy, we'll predict mean only
         self.mean = nn.Linear(encoding_dim, encoding_dim)
         # Use fixed log_std of 0 instead of learnable parameter
         self.log_std = 0.0
+        
+        # Initialize weights using Kaiming initialization
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
     
     def forward(self, z_t):
-        # Apply MLP
-        features = self.mlp(z_t)
+        # Apply input projection
+        x = self.input_proj(z_t)
+        x = self.input_activation(x)
+        
+        # Apply residual blocks
+        for i, (block, layer_norm) in enumerate(zip(self.residual_blocks, self.layer_norms)):
+            # Save input for residual connection
+            residual = x
+            
+            # Apply block layers
+            for layer in block:
+                x = layer(x)
+            
+            # Add residual connection and normalize
+            x = layer_norm(x + residual)
+        
+        # Apply output projection
+        features = self.output_proj(x)
         
         # Predict mean and use fixed log_std of 0
         mean = self.mean(features)
@@ -191,9 +299,10 @@ class PLDMModel(nn.Module):
         self,
         img_size=64,
         in_channels=3,
-        encoding_dim=64,
+        encoding_dim=32,
         action_dim=2,
-        hidden_dim=128
+        hidden_dim=512,
+        encoder_embedding=256
     ):
         super().__init__()
         
@@ -201,7 +310,8 @@ class PLDMModel(nn.Module):
         self.encoder = ViTEncoder(
             img_size=img_size,
             in_channels=in_channels,
-            embedding_dim=encoding_dim
+            embedding_dim=encoder_embedding,
+            encoding_dim=encoding_dim
         )
         
         self.dynamics = DynamicsModel(
@@ -230,71 +340,147 @@ class PLDMModel(nn.Module):
         """Predict next state given current encoded state and action"""
         return self.dynamics(z_t, a_t)
     
-    def search_action(self, z_t, z_target, num_steps=60, lr=0.5, verbose=False, max_step_norm=15):
-        """Search for the action that leads from z_t to z_target"""
-        # Detach inputs but keep dtype and device
+    def search_action(self, z_t, z_target, verbose=False, max_step_norm=15, num_samples=500):
+        """Search for the action that leads from z_t to z_target using parallel sampling"""
+        # Keep track of device and dtype
         dtype = z_t.dtype
         device = z_t.device
+        batch_size = z_t.shape[0]
+
+        assert batch_size == 1, "Batch size must be 1 for parallel action search"
         
         if verbose:
-            print(f"Starting action search with {num_steps} steps, lr={lr}")
+            print(f"Starting parallel action search with {num_samples} samples")
             print(f"z_t shape: {z_t.shape}, dtype: {dtype}")
             print(f"z_target shape: {z_target.shape}, dtype: {dtype}")
         
-        # Initialize action from uniform distribution within a smaller range (2/3 of the environment's action bounds)
-        action = torch.rand(z_t.shape[0], self.action_dim, device=device, dtype=torch.float32) 
-        action = action * 2 * (2*max_step_norm/3) - (2*max_step_norm/3)  # Scale to [-2*max_step_norm/3, 2*max_step_norm/3]
+        # Ensure inputs are detached to avoid gradient tracking
+        z_t = z_t.detach()
+        z_target = z_target.detach()
         
-        if verbose:
-            print(f"Initial action: {action.cpu().numpy()}, norm: {action.norm().item():.4f}")
+        # Expand z_t to match the number of sampled actions
+        # Shape: [batch_size, encoding_dim] -> [batch_size, num_samples, encoding_dim]
+        expanded_z_t = z_t.unsqueeze(1).expand(-1, num_samples, -1)
+        # Reshape to [batch_size * num_samples, encoding_dim] for batch processing
+        expanded_z_t = expanded_z_t.reshape(-1, z_t.shape[-1])
         
-        # We will implement manual optimization without using autograd
-        # This avoids gradient flow issues completely
-        z_t_float = z_t.detach().to(torch.float32)
-        z_target_float = z_target.detach().to(torch.float32)
+        # Similarly expand z_target
+        expanded_z_target = z_target.unsqueeze(1).expand(-1, num_samples, -1)
+        expanded_z_target = expanded_z_target.reshape(-1, z_target.shape[-1])
         
-        # Manual optimization loop
-        for i in range(num_steps):
-            # Forward pass using float32 precision
-            with torch.no_grad():  # Explicitly disable gradients
-                # Cast action to model dtype for forward pass
-                action_cast = action.to(dtype)
-                
-                # Predict next state
-                z_next_pred = self.dynamics(z_t_float.to(dtype), action_cast)
-                
-                # Compute loss
-                z_next_pred_float = z_next_pred.to(torch.float32)
-                loss = ((z_next_pred_float - z_target_float) ** 2).mean().item()
-                
-                # Estimate gradient using finite differences
-                # This is a simple but effective approximation for our purpose
-                grad = torch.zeros_like(action)
-                eps = 1e-4
-                
-                # Compute gradient for each dimension of the action
-                for j in range(self.action_dim):
-                    # Perturb action in positive direction
-                    action_pos = action.clone()
-                    action_pos[:, j] += eps
-                    action_pos_cast = action_pos.to(dtype)
-                    
-                    # Forward pass with perturbed action
-                    z_next_pos = self.dynamics(z_t_float.to(dtype), action_pos_cast)
-                    loss_pos = ((z_next_pos.to(torch.float32) - z_target_float) ** 2).mean().item()
-                    
-                    # Compute approximate gradient
-                    grad[:, j] = (loss_pos - loss) / eps
-                
-                # Update action (gradient descent step)
-                action = action - lr * grad
-                
-                # Optional: Print progress
-                if verbose:
-                    print(f"  Action search step {i}, Loss: {loss:.6f}, Action: {action.cpu().numpy()}")
+        # Sample actions uniformly within the allowed action space
+        # Shape: [batch_size, num_samples, action_dim]
+        sampled_actions = torch.rand(batch_size, num_samples, self.action_dim, device=device, dtype=dtype) 
+        sampled_actions = sampled_actions * 2 * max_step_norm - max_step_norm  # Scale to [-max_step_norm, max_step_norm]
         
-        if verbose:
-            print(f"Final action: {action.cpu().numpy()}, Final loss: {loss:.6f}")
+        # Reshape actions to [batch_size * num_samples, action_dim] for batch processing
+        flat_actions = sampled_actions.reshape(-1, self.action_dim)
+        
+        # Forward pass through dynamics model to get predicted next states
+        with torch.no_grad():
+            # Predict next states for all sampled actions in a single forward pass
+            z_next_pred = self.dynamics(expanded_z_t, flat_actions)
             
-        # Cast final action to the model's dtype before returning
-        return action.to(dtype).detach() 
+            # Compute squared error loss between predicted next states and target state
+            # Shape: [batch_size * num_samples, encoding_dim]
+            squared_errors = (z_next_pred - expanded_z_target) ** 2
+            
+            # Average across encoding dimensions to get scalar loss per action
+            # Shape: [batch_size * num_samples]
+            losses = squared_errors.mean(dim=-1)
+            
+            # Reshape losses to [batch_size, num_samples] to find best action per batch item
+            losses = losses.reshape(batch_size, num_samples)
+            
+            # Get indices of best actions (lowest loss) for each item in the batch
+            best_action_indices = torch.argmin(losses, dim=1)
+            
+            # Get the corresponding best actions
+            best_actions = torch.stack([
+                sampled_actions[i, best_action_indices[i]] for i in range(batch_size)
+            ])
+            
+            if verbose:
+                best_losses = torch.stack([
+                    losses[i, best_action_indices[i]] for i in range(batch_size)
+                ])
+                print(f"Best action losses: {best_losses.cpu().numpy()}")
+                print(f"Best actions: {best_actions.cpu().numpy()}")
+        
+        return best_actions
+    
+    def to(self, *args, **kwargs):
+        """
+        Moves and/or casts the parameters and buffers.
+        
+        This method has the same functionality as PyTorch's nn.Module.to() method,
+        but ensures all parameters and buffers of the model are properly converted
+        to the same dtype, which is important for mixed precision training.
+        """
+        # Call the parent class's to() method to handle the actual conversion
+        device_or_dtype = args[0] if args else kwargs.get('device', None) or kwargs.get('dtype', None)
+        
+        # If we're converting to BFloat16, we need to be extra careful
+        if device_or_dtype == torch.bfloat16 or kwargs.get('dtype') == torch.bfloat16:
+            print("Converting model to BFloat16 with special handling")
+            
+            # First convert the entire model structure
+            model = super().to(*args, **kwargs)
+            
+            # Explicitly convert all parameters and buffers in submodules
+            for module in model.modules():
+                for param_name, param in module._parameters.items():
+                    if param is not None:
+                        module._parameters[param_name] = param.to(torch.bfloat16)
+                
+                for buffer_name, buffer in module._buffers.items():
+                    if buffer is not None:
+                        module._buffers[buffer_name] = buffer.to(torch.bfloat16)
+            
+            # Specifically check that encoder's conv layers have BF16 bias
+            for module in model.encoder.modules():
+                if isinstance(module, nn.Conv2d):
+                    if module.bias is not None:
+                        # Double-check the bias tensor
+                        if module.bias.dtype != torch.bfloat16:
+                            print(f"Converting Conv2d bias from {module.bias.dtype} to BFloat16")
+                            module.bias = nn.Parameter(module.bias.to(torch.bfloat16))
+            
+            return model
+        else:
+            # For other dtypes, use the standard method
+            return super().to(*args, **kwargs)
+    
+    def print_parameter_count(self):
+        """Prints the number of parameters for each component of the model"""
+        # Count encoder parameters
+        encoder_params = sum(p.numel() for p in self.encoder.parameters())
+        
+        # Count dynamics model parameters
+        dynamics_params = sum(p.numel() for p in self.dynamics.parameters())
+        
+        # Count next goal predictor parameters
+        predictor_params = sum(p.numel() for p in self.next_goal_predictor.parameters())
+        
+        # Count total parameters
+        total_params = sum(p.numel() for p in self.parameters())
+        
+        # Print results
+        print(f"\nPLDM Model Parameter Counts:")
+        print(f"Encoder: {encoder_params:,} parameters")
+        print(f"Dynamics Model: {dynamics_params:,} parameters")
+        print(f"Next Goal Predictor: {predictor_params:,} parameters")
+        print(f"Total: {total_params:,} parameters")
+        
+        # Print percentage breakdown
+        print(f"\nPercentage Breakdown:")
+        print(f"Encoder: {encoder_params/total_params*100:.1f}%")
+        print(f"Dynamics Model: {dynamics_params/total_params*100:.1f}%")
+        print(f"Next Goal Predictor: {predictor_params/total_params*100:.1f}%")
+        
+        return {
+            "encoder": encoder_params,
+            "dynamics": dynamics_params,
+            "predictor": predictor_params,
+            "total": total_params
+        } 
