@@ -498,8 +498,8 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
-    parser.add_argument('--model_path', type=str, default='output_recon_batch64/checkpoint.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='test_output_better_reward_checkpoint', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_v/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='test_output_v', help='Directory to save test results')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to evaluate')
