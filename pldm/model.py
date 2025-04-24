@@ -150,8 +150,9 @@ class DynamicsModel(nn.Module):
             ])
             self.residual_blocks.append(block)
         
-        # Output projection
+        # Output projection followed by optional LayerNorm to stabilise scale
         self.output_proj = nn.Linear(hidden_dim, encoding_dim)
+        self.output_ln = nn.LayerNorm(encoding_dim)
         
         # Layer norm for residual connections
         self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(len(self.residual_blocks))])
@@ -202,8 +203,8 @@ class DynamicsModel(nn.Module):
             # Add residual connection and normalize
             x = layer_norm(x + residual)
         
-        # Apply output projection
-        z_next = self.output_proj(x)
+        # Apply output projection and layer normalisation
+        z_next = self.output_ln(self.output_proj(x))
         
         return z_next
 

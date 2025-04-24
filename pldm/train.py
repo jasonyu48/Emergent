@@ -454,7 +454,8 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
             continue
         parts.append(f"{comp}: g={d['g']/d['n']:.2e}, u={d['u']/d['n']:.2e}, Δw/|w|={d['r']/d['n']:.2e}")
     if parts:
-        print(f"[GradStats step={step_idx}] " + " | ".join(parts))
+        from tqdm.auto import tqdm as _tqdm
+        _tqdm.write(f"[GradStats step={step_idx}] " + " | ".join(parts))
 
 # -----------------------------------------------------------------------------
 # Utility: log gradient contributions to encoder from individual loss terms
@@ -493,7 +494,8 @@ def _log_encoder_grad_sources(encoder_params, loss_dict, step_idx=0):
 
     if stats:
         parts = [f"{k}: |g|={v:.2e}" for k, v in stats.items()]
-        print(f"[EncGradSources step={step_idx}] " + " | ".join(parts))
+        from tqdm.auto import tqdm as _tqdm
+        _tqdm.write(f"[EncGradSources step={step_idx}] " + " | ".join(parts))
 
 def train_pldm(args):
     """Main training function for PLDM model"""
@@ -624,7 +626,19 @@ def train_pldm(args):
     # Determine number of data loader workers based on CPU cores
     num_workers = min(args.num_workers if hasattr(args, 'num_workers') else 4, max(1, (multiprocessing.cpu_count() - 1) // 2))
     print(f"Using {num_workers} parallel workers for episode collection")
-    
+
+    # ---------------------------------------------------------------------
+    # Sanity check: batch_size must divide (num_workers * max_steps_per_episode)
+    # so that each round of environment collection produces an integral
+    # number of training batches.
+    # ---------------------------------------------------------------------
+    total_steps_per_round = num_workers * args.max_steps_per_episode
+    if total_steps_per_round % args.batch_size != 0:
+        raise ValueError(
+            f"batch_size ({args.batch_size}) must divide num_workers*max_steps_per_episode "
+            f"({total_steps_per_round}). Please choose compatible values."
+        )
+
     # Create parallel episode collector
     collector = ParallelEpisodeCollector(
         model=model, 
@@ -636,9 +650,10 @@ def train_pldm(args):
         use_gpu_for_inference=args.use_gpu_inference,  # Use GPU for inference since we have a powerful A100
         num_samples=args.num_samples
     )
-    
+
     try:
         # Training loop
+        transition_buffer = []  # holds (s, s_next, a, ng, R_t)
         for epoch in range(start_epoch, args.epochs):
             total_reward = 0
             total_policy_loss = 0
@@ -646,11 +661,12 @@ def train_pldm(args):
             total_next_state_loss = 0
             total_on_the_same_page_loss = 0
             total_reconstruction_loss = 0
+            total_variance_loss = 0
             num_episodes = 0
-            
+
             # Adjust learning rates for this epoch
             encoder_lr, dynamics_lr, policy_lr, decoder_lr = adjust_learning_rates(epoch)
-            
+
             # Log current learning rates
             print(f"Epoch {epoch+1}/{args.epochs} - Learning rates: Encoder={encoder_lr:.2e}, "
                   f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Decoder={decoder_lr:.2e}")
@@ -659,190 +675,145 @@ def train_pldm(args):
             writer.add_scalar('LearningRate/dynamics', dynamics_lr, epoch)
             writer.add_scalar('LearningRate/policy', policy_lr, epoch)
             writer.add_scalar('LearningRate/decoder', decoder_lr, epoch)
-            
-            # Process episodes in batches
-            progress_bar = tqdm(total=args.episodes_per_epoch, desc=f"Epoch {epoch+1}/{args.epochs}")
-            episode_idx = 0
-            
-            # Set model to train mode for the main thread
+
+            # ------------------------------------------------------------------
+            # We now define an *update* as a gradient step computed from
+            # `args.batch_size` **transitions** (time-steps), not episodes.
+            # The number of updates per epoch is controlled by args.updates_per_epoch.
+            # ------------------------------------------------------------------
+            progress_bar = tqdm(total=args.updates_per_epoch, desc=f"Epoch {epoch+1}/{args.epochs}")
+            update_idx = 0
+
+            # Ensure model is in train mode on the main thread
             model.train()
-            
-            while episode_idx < args.episodes_per_epoch:
-                # Collect batch_size trajectories (or whatever remains in the epoch)
-                batch_size = min(args.batch_size, args.episodes_per_epoch - episode_idx)
-                
-                # Get batch from parallel collector (this is prefetched in parallel)
-                trajectories = collector.get_batch(batch_size)
-                valid_episodes = len(trajectories)
-                
-                # Skip if no valid episodes
-                if valid_episodes == 0:
-                    # Just in case we're not getting episodes, sleep briefly
-                    time.sleep(0.1)
-                    continue
-                
-                # Process collected trajectories
-                batch_states = []
-                batch_next_states = []
-                batch_actions = []
-                batch_log_probs = []
-                batch_returns = []
-                batch_rewards = []
-                batch_next_goals = []
-                
-                for trajectory in trajectories:
-                    states = trajectory['states']
-                    actions = trajectory['actions']
-                    log_probs = trajectory['log_probs']
-                    next_goals = trajectory['next_goals']
-                    rewards = trajectory['rewards']
-                    
-                    # Calculate rewards for this episode
+
+            while update_idx < args.updates_per_epoch:
+                # ------------------------------------------------------------
+                # 1) Ensure buffer has >= batch_size transitions
+                # ------------------------------------------------------------
+                while len(transition_buffer) < args.batch_size:
+                    episodes = collector.get_batch(1)
+                    if len(episodes) == 0:
+                        time.sleep(0.05)
+                        continue
+
+                    traj = episodes[0]
+                    states = traj['states']
+                    actions = traj['actions']
+                    rewards = traj['rewards']
+                    next_goals = traj['next_goals']
+
+                    T = len(actions)
+
+                    # stats
                     episode_reward = sum(rewards)
                     total_reward += episode_reward
-                    
-                    # Calculate returns for this episode
+                    num_episodes += 1
+
+                    # returns
                     returns = compute_returns(rewards, gamma=args.gamma)
-                    
-                    # Convert data to tensors and move to device with non-blocking transfers
-                    states_tensor = []
-                    for s in states[:-1]:  # All states except the last one
-                        if isinstance(s, torch.Tensor):
-                            s_tensor = s.to(device=device, non_blocking=True)
-                        else:
-                            s_tensor = torch.tensor(s, device=device)
-                        
-                        # No need to cast to bf16 - autocast will handle precision
-                        s_tensor = s_tensor.float()
-                        
-                        states_tensor.append(s_tensor)
-                    
-                    next_states_tensor = []
-                    for s in states[1:]:  # All states except the first one
-                        if isinstance(s, torch.Tensor):
-                            s_tensor = s.to(device=device, non_blocking=True)
-                        else:
-                            s_tensor = torch.tensor(s, device=device)
-                        
-                        # No need to cast to bf16 - autocast will handle precision
-                        s_tensor = s_tensor.float()
-                        
-                        next_states_tensor.append(s_tensor)
-                    
-                    actions_tensor = []
-                    for a in actions:
-                        if isinstance(a, torch.Tensor):
-                            a_tensor = a.to(device=device, non_blocking=True)
-                        else:
-                            a_tensor = torch.tensor(a, device=device)
-                        
-                        # No need to cast to bf16 - autocast will handle precision
-                        a_tensor = a_tensor.float()
-                            
-                        actions_tensor.append(a_tensor)
 
-                    next_goals_tensor = []
-                    for ng in next_goals:
-                        if isinstance(ng, torch.Tensor):
-                            ng_tensor = ng.to(device=device, non_blocking=True)
-                        else:
-                            ng_tensor = torch.tensor(ng, device=device)
+                    for t in range(T):
+                        s_t = torch.tensor(states[t], device=device).float() if not isinstance(states[t], torch.Tensor) else states[t].to(device).float()
+                        s_next = torch.tensor(states[t+1], device=device).float() if not isinstance(states[t+1], torch.Tensor) else states[t+1].to(device).float()
+                        a_t = torch.tensor(actions[t], device=device).float() if not isinstance(actions[t], torch.Tensor) else actions[t].to(device).float()
+                        ng_t = torch.tensor(next_goals[t], device=device).float() if not isinstance(next_goals[t], torch.Tensor) else next_goals[t].to(device).float()
+                        transition_buffer.append((s_t, s_next, a_t, ng_t, returns[t].item()))
 
-                        # No need to cast to bf16 - autocast will handle precision
-                        ng_tensor = ng_tensor.float()
-                            
-                        next_goals_tensor.append(ng_tensor)
-                    
-                    # Add to batch data
-                    batch_states.extend(states_tensor)
-                    batch_next_states.extend(next_states_tensor)
-                    batch_actions.extend(actions_tensor)
-                    batch_log_probs.extend(log_probs)
-                    batch_returns.extend(returns.tolist())
-                    batch_rewards.append(episode_reward)
-                    batch_next_goals.extend(next_goals_tensor)
-                
-                # Prefetch done, update episode count
-                episode_idx += valid_episodes
-                num_episodes += valid_episodes
-                progress_bar.update(valid_episodes)
-                
-                # Log individual episode metrics for the first episode in the batch
-                writer.add_scalar('Reward/individual_episode', batch_rewards[0], global_step + episode_idx)
-                
-                # Convert batch data to tensors - always use float32 for loss computation tensors
-                # Autocast will handle the conversion to lower precision during forward pass
+                # ------------------------------------------------------------
+                # 2) Sample batch_size transitions *without replacement*
+                # ------------------------------------------------------------
+                import random as _rnd
+                indices = _rnd.sample(range(len(transition_buffer)), args.batch_size)
+                indices.sort(reverse=True)  # sort descending for safe pop
+
+                batch_states, batch_next_states, batch_actions, batch_next_goals, batch_returns = [], [], [], [], []
+                for idx in indices:
+                    s_t, s_next, a_t, ng_t, R_t = transition_buffer.pop(idx)
+                    batch_states.append(s_t)
+                    batch_next_states.append(s_next)
+                    batch_actions.append(a_t)
+                    batch_next_goals.append(ng_t)
+                    batch_returns.append(R_t)
+
+                # ------------------------------------------------------------
+                # 3) Compute losses on the sampled batch
+                # ------------------------------------------------------------
                 batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
 
-                # We will compute log‑probs inside the dynamics loop to avoid
-                # encoding the same observation twice.
-                
-                # Use autocast for mixed precision training
                 with torch.amp.autocast('cuda', enabled=amp_dtype is not None, dtype=amp_dtype):
-                    # Policy loss (policy gradient)
                     policy_log_probs = []
-                    dynamics_loss = 0
-                    next_state_loss = 0
-                    on_the_same_page_loss = 0
-                    reconstruction_loss = 0
+                    dynamics_loss = 0.0
+                    next_state_loss = 0.0
+                    on_the_same_page_loss = 0.0
+                    reconstruction_loss = 0.0
+                    variance_loss = 0.0
+
+                    # Keep all z_t to compute batch variance later
+                    batch_encodings = []
 
                     for state, next_state, action, next_goal in zip(batch_states, batch_next_states, batch_actions, batch_next_goals):
-                        # Encode current and next state
                         z_t = model.encode(state.unsqueeze(0))
                         z_next_actual = model.encode(next_state.unsqueeze(0))
 
-                        # Decoder warm-up loss
+                        # Accumulate z_t for variance computation
+                        batch_encodings.append(z_t.squeeze(0))
+
+                        # Decoder warm-up reconstruction loss
                         if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
                             recon = model.decode(z_t)
-                            target_img = state.unsqueeze(0).float() / 255.0 if state.max() > 1.0 else state.unsqueeze(0).float()
+                            target_img = state.unsqueeze(0) / 255.0 if state.max() > 1.0 else state.unsqueeze(0)
                             reconstruction_loss += F.mse_loss(recon, target_img)
 
-                        # Log‑prob of stored goal
+                        # Policy log-prob
                         log_prob = model.next_goal_predictor.log_prob(z_t, next_goal.unsqueeze(0))
                         policy_log_probs.append(log_prob.squeeze(0))
 
-                        # Predict next state using dynamics model directly
+                        # Dynamics prediction
                         a_t = action.unsqueeze(0)
                         z_next_pred = model.dynamics(z_t, a_t)
-
-                        # Add to dynamics loss
                         dynamics_loss += F.mse_loss(z_next_pred, z_next_actual)
 
-                        # Conditional losses based on args
                         if args.use_next_state_loss:
-                            next_state_loss += 0 # not implemented yet
-                            print("Next state loss is not implemented yet")
-
+                            next_state_loss += 0  # placeholder
                         if args.use_same_page_loss:
                             on_the_same_page_loss += F.mse_loss(next_goal, z_next_pred)
 
-                    batch_log_probs_tensor = torch.stack(policy_log_probs)
-                    policy_loss = -(batch_log_probs_tensor * batch_returns_tensor).mean()
+                    # Average losses over batch transitions
+                    dynamics_loss = dynamics_loss / len(batch_states)
+                    if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
+                        reconstruction_loss = reconstruction_loss / len(batch_states)
+                    if args.use_next_state_loss:
+                        next_state_loss = next_state_loss / len(batch_states)
+                    if args.use_same_page_loss:
+                        on_the_same_page_loss = on_the_same_page_loss / len(batch_states)
 
-                    if len(batch_states) > 0:
-                        dynamics_loss = dynamics_loss / len(batch_states)
-                        if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
-                            reconstruction_loss = reconstruction_loss / len(batch_states)
-                        if args.use_next_state_loss:
-                            next_state_loss = next_state_loss / len(batch_states)
-                        if args.use_same_page_loss:
-                            on_the_same_page_loss = on_the_same_page_loss / len(batch_states)
+                    # ------------------------------------------------------------------
+                    # Variance regularization (VICReg-style): encourage each latent dim to
+                    # have std ≥ 1 across the batch. Penalise only during warm-up.
+                    # ------------------------------------------------------------------
+                    if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
+                        enc_stack = torch.stack(batch_encodings, dim=0)  # [B, D]
+                        enc_stack = F.normalize(enc_stack, p=2, dim=1)     # unit-norm vectors
+                        var = enc_stack.var(dim=0, unbiased=False) + 1e-4
+                        std = torch.sqrt(var)
+                        variance_loss = F.relu(1.0 - std).mean()
+
+                    policy_log_probs_tensor = torch.stack(policy_log_probs)
+                    policy_loss = -(policy_log_probs_tensor * batch_returns_tensor).mean()
 
                     # Total loss
                     loss = args.lambda_policy * policy_loss + args.lambda_dynamics * dynamics_loss
                     if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
                         loss += args.lambda_recon * reconstruction_loss
-                    
-                    # Add conditional losses
                     if args.use_next_state_loss:
                         loss += args.lambda_dynamics * next_state_loss
-                    
                     if args.use_same_page_loss:
                         loss += args.lambda_dynamics * on_the_same_page_loss
+                    if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
+                        loss += args.lambda_variance * variance_loss
 
-                # --------------------------------------------------------
-                # Log encoder gradient sources BEFORE optimizer step
-                # --------------------------------------------------------
+                # Log encoder grad sources
                 encoder_params_list = [p for p in model.encoder.parameters() if p.requires_grad]
                 loss_contributions = {
                     'policy': args.lambda_policy * policy_loss,
@@ -854,33 +825,25 @@ def train_pldm(args):
                     loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
                 if args.use_same_page_loss:
                     loss_contributions['same_page'] = args.lambda_dynamics * on_the_same_page_loss
+                if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
+                    loss_contributions['variance'] = args.lambda_variance * variance_loss
+                # _log_encoder_grad_sources every 8 updates
+                if global_step % args.log_steps == 0:
+                    _log_encoder_grad_sources(encoder_params_list, loss_contributions, global_step)
 
-                _log_encoder_grad_sources(encoder_params_list, loss_contributions, global_step)
-
-                # Backward pass with scaler for FP16 or regular backward for BF16/FP32
+                # Optimizer step
                 if amp_dtype == torch.float16:
-                    # Use scaler for FP16 precision
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
-                    _log_grad_update_stats(model, optimizer, global_step)
                 else:
-                    # Regular backward for BF16 or FP32
                     loss.backward()
                     optimizer.step()
+                if global_step % args.log_steps == 0:
                     _log_grad_update_stats(model, optimizer, global_step)
-                
-                # Update statistics
-                total_policy_loss += policy_loss.item() * valid_episodes
-                total_dynamics_loss += dynamics_loss.item() * valid_episodes
-                if args.use_next_state_loss:
-                    total_next_state_loss += next_state_loss.item() * valid_episodes
-                if args.use_same_page_loss:
-                    total_on_the_same_page_loss += on_the_same_page_loss.item() * valid_episodes
-                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
-                    total_reconstruction_loss += reconstruction_loss.item() * valid_episodes
-                
-                # Log batch metrics
+                optimizer.zero_grad()
+
+                # Logging
                 writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
                 writer.add_scalar('Loss/dynamics', dynamics_loss.item(), global_step)
                 if args.use_next_state_loss:
@@ -889,11 +852,29 @@ def train_pldm(args):
                     writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
                 if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
                     writer.add_scalar('Loss/reconstruction', reconstruction_loss.item(), global_step)
+                if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
+                    writer.add_scalar('Loss/variance', variance_loss.item(), global_step)
                 writer.add_scalar('Loss/total', loss.item(), global_step)
-                writer.add_scalar('Reward/batch_mean', sum(batch_rewards)/len(batch_rewards), global_step)
-                
+                writer.add_scalar('Reward/individual_episode', batch_returns[0], global_step)
+
+                # ---------------- aggregate epoch-level stats -----------------
+                total_policy_loss += policy_loss.item()
+                total_dynamics_loss += dynamics_loss.item()
+                if args.use_next_state_loss:
+                    total_next_state_loss += next_state_loss.item()
+                if args.use_same_page_loss:
+                    total_on_the_same_page_loss += on_the_same_page_loss.item()
+                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
+                    total_reconstruction_loss += reconstruction_loss.item()
+                if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
+                    # accumulate for reporting
+                    pass  # variance loss is diagnostic; not included in epoch stats for now
+
+                # ----------------------------------------------------------------
                 global_step += 1
-            
+                update_idx += 1
+                progress_bar.update(1)
+
             progress_bar.close()
                     
             # Epoch statistics
@@ -965,30 +946,32 @@ def parse_args():
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--episodes_per_epoch', type=int, default=128, help='Number of episodes per epoch')
-    parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
-    parser.add_argument('--max_steps_per_episode', type=int, default=40, help='Maximum steps per episode')
+    parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
+    parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
+    parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=16, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
+    parser.add_argument('--log_steps', type=int, default=16, help='Logging frequency for gradient statistics')
 
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
     parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', type=bool, default=True, help='Enable decoder reconstruction warm-up loss')
-    parser.add_argument('--warmup_epochs_decoder', type=int, default=15, help='Number of epochs to train decoder')
+    parser.add_argument('--warmup_epochs_decoder', type=int, default=20, help='Number of epochs to train decoder')
 
     
-    parser.add_argument('--lambda_dynamics', type=float, default=1.0, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1e-3, help='Weight for policy loss')
-    parser.add_argument('--lambda_recon', type=float, default=1e6, help='Weight for reconstruction loss during warm-up')
+    parser.add_argument('--lambda_dynamics', type=float, default=1e-2, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_policy', type=float, default=1e-7, help='Weight for policy loss')
+    parser.add_argument('--lambda_recon', type=float, default=1e5, help='Weight for reconstruction loss during warm-up')
+    parser.add_argument('--lambda_variance', type=float, default=1e1, help='Weight for encoder variance loss during warm-up')
     
     # Optimizer parameters
-    parser.add_argument('--encoder_lr', type=float, default=5e-10, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=5e-6, help='Learning rate for policy')
-    parser.add_argument('--decoder_lr', type=float, default=5e-6, help='Learning rate for decoder')
+    parser.add_argument('--encoder_lr', type=float, default=5e-9, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=5e-1, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=5e-3, help='Learning rate for policy')
+    parser.add_argument('--decoder_lr', type=float, default=2e-4, help='Learning rate for decoder')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
@@ -996,7 +979,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_recon', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_recon_batch64', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     
     return parser.parse_args()
