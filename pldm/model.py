@@ -236,6 +236,8 @@ class NextGoalPredictor(nn.Module):
         
         # Output projection to features
         self.output_proj = nn.Linear(hidden_dim, encoding_dim)
+        # Value head for state-value prediction
+        self.value_head = nn.Linear(hidden_dim, 1)
         
         # Layer norm for residual connections
         self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(len(self.residual_blocks))])
@@ -258,27 +260,9 @@ class NextGoalPredictor(nn.Module):
             nn.init.zeros_(m.bias)
     
     def forward(self, z_t):
-        # Apply input projection
-        x = self.input_proj(z_t)
-        x = self.input_activation(x)
-        
-        # Apply residual blocks
-        for i, (block, layer_norm) in enumerate(zip(self.residual_blocks, self.layer_norms)):
-            # Save input for residual connection
-            residual = x
-            
-            # Apply block layers
-            for layer in block:
-                x = layer(x)
-            
-            # Add residual connection and normalize
-            x = layer_norm(x + residual)
-        
-        # Apply output projection
-        features = self.output_proj(x)
-        
-        # Predict mean and use fixed log_std of 0
-        mean = self.mean(features)
+        x = self._compute_features(z_t)
+        x = self.output_proj(x)
+        mean = self.mean(x)
         
         # Create distribution with fixed std of 1.0 (since log(1.0) = 0.0)
         std = torch.ones_like(mean)
@@ -292,23 +276,37 @@ class NextGoalPredictor(nn.Module):
         
         return z_next, log_prob
 
-    # ---------------------------------------------------------------------
-    #  Utility: return distribution / log‑prob for a given sampled goal
-    # ---------------------------------------------------------------------
-    def _get_distribution(self, z_t):
-        """Return Normal distribution N(mean(z_t), 1)."""
-        # reuse same computation as in forward without sampling
+    # ------------------------------------------------------------------
+    #  Internal helpers
+    # ------------------------------------------------------------------
+
+    def _compute_features(self, z_t):
+        """Shared forward over MLP to get intermediate features."""
         x = self.input_activation(self.input_proj(z_t))
         for block, layer_norm in zip(self.residual_blocks, self.layer_norms):
             residual = x
             for layer in block:
                 x = layer(x)
             x = layer_norm(x + residual)
-        features = self.output_proj(x)
-        mean = self.mean(features)
+        return x
+    
+    def _get_distribution(self, z_t):
+        """Return Normal distribution N(mean(z_t), 1)."""
+        x = self._compute_features(z_t)
+        x = self.output_proj(x)
+        mean = self.mean(x)
         std = torch.ones_like(mean)
         return Normal(mean, std)
-
+    
+    # ------------------------------------------------------------------
+    #  Value prediction
+    # ------------------------------------------------------------------
+    def value(self, z_t):
+        """Predict state value V(z_t)."""
+        features = self._compute_features(z_t)
+        value = self.value_head(features).squeeze(-1)  # [B]
+        return value
+    
     def log_prob(self, z_t, z_sample):
         """Log probability of `z_sample` under the policy p(z_next|z_t)."""
         dist = self._get_distribution(z_t)
