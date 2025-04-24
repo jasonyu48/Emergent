@@ -399,62 +399,60 @@ class ParallelEpisodeCollector:
 # Utility: log gradient/update statistics
 # -----------------------------------------------------------------------------
 def _log_grad_update_stats(model, optimizer, step_idx=0):
-    """Print average |grad| and |update| (lr*|grad|) for main components.
+    """Print average relative parameter update (Δw/|w|) for policy vs value nets.
 
-    Components are inferred from parameter names:
-      encoder.*  -> 'encoder'
-      dynamics.* -> 'dynamics'
-      next_goal_predictor.* -> 'predictor'
-      decoder.* -> 'decoder'
-      otherwise -> 'other'
+    • Parameters belonging to `next_goal_predictor.value_mlp.*` are grouped as 'value_net'.
+    • All other `next_goal_predictor.*` parameters are grouped as 'policy_net'.
+    Only the mean Δw/|w| is reported for each group.
     """
-    # Map param -> lr for quick lookup
+
+    # Map each parameter id to its learning-rate for fast lookup
     param_lr = {}
     for group in optimizer.param_groups:
         lr = group.get('lr', 0.0)
         for p in group['params']:
             param_lr[id(p)] = lr
 
-    stats = {}
-    def _add(comp, g, u, r):
-        if comp not in stats:
-            stats[comp] = {'g': 0.0, 'u': 0.0, 'r': 0.0, 'n': 0}
-        stats[comp]['g'] += g
-        stats[comp]['u'] += u
-        stats[comp]['r'] += r
-        stats[comp]['n'] += 1
+    # Accumulators
+    acc = {
+        'encoder':    {'sum': 0.0, 'n': 0},
+        'dynamics':   {'sum': 0.0, 'n': 0},
+        'policy_net': {'sum': 0.0, 'n': 0},
+        'value_net':  {'sum': 0.0, 'n': 0},
+    }
 
     for name, p in model.named_parameters():
         if p.grad is None:
             continue
-        comp = 'other'
+
         if name.startswith('encoder'):
-            comp = 'encoder'
+            key = 'encoder'
         elif name.startswith('dynamics'):
-            comp = 'dynamics'
-        elif name.startswith('next_goal_predictor.value_head'):
-            comp = 'value_head'
+            key = 'dynamics'
         elif name.startswith('next_goal_predictor'):
-            comp = 'predictor'
-        elif name.startswith('decoder'):
-            comp = 'decoder'
+            if name.startswith('next_goal_predictor.value_mlp'):
+                key = 'value_net'
+            else:
+                key = 'policy_net'
+        else:
+            # skip parameters outside predictor
+            continue
 
         lr = param_lr.get(id(p), 0.0)
-        param_mean = p.abs().mean().item()
         grad_mean = p.grad.abs().mean().item()
-        upd_mean = lr * grad_mean
-        
-        # Calculate relative update (Δw/|w|)
-        # Use a small epsilon to avoid division by zero
-        rel_upd = upd_mean / (param_mean + 1e-8)
-        
-        _add(comp, grad_mean, upd_mean, rel_upd)
+        param_mean = p.abs().mean().item()
+        rel_upd = (lr * grad_mean) / (param_mean + 1e-8)  # Δw/|w|
 
+        acc[key]['sum'] += rel_upd
+        acc[key]['n'] += 1
+
+    # Compose log line
     parts = []
-    for comp, d in stats.items():
-        if d['n'] == 0:
+    for k in ('encoder','dynamics','policy_net','value_net'):
+        if acc[k]['n'] == 0:
             continue
-        parts.append(f"{comp}: g={d['g']/d['n']:.2e}, u={d['u']/d['n']:.2e}, Δw/|w|={d['r']/d['n']:.2e}")
+        parts.append(f"{k}: Δw/|w|={acc[k]['sum']/acc[k]['n']:.2e}")
+
     if parts:
         from tqdm.auto import tqdm as _tqdm
         _tqdm.write(f"[GradStats step={step_idx}] " + " | ".join(parts))
@@ -463,13 +461,14 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
 # Utility: log gradient contributions to encoder from individual loss terms
 # -----------------------------------------------------------------------------
 
-def _log_encoder_grad_sources(encoder_params, loss_dict, step_idx=0):
-    """Print mean |grad| on encoder params attributed to each loss term.
+def _log_encoder_grad_sources(params, loss_dict, step_idx=0, prefix="EncGradSources"):
+    """Print mean |grad| on *params* attributed to each loss term.
 
     Args:
-        encoder_params: list of encoder parameters (with .requires_grad=True).
+        params: list of parameters whose gradients we want to probe.
         loss_dict: dict mapping loss_name -> loss_tensor (already scaled).
         step_idx: global step index for logging purposes.
+        prefix: string prefix for the printed message (identifies the param set).
     """
     stats = {}
     for name, loss in loss_dict.items():
@@ -478,7 +477,7 @@ def _log_encoder_grad_sources(encoder_params, loss_dict, step_idx=0):
         # Compute grads w.r.t encoder params WITHOUT accumulating into .grad
         grads = torch.autograd.grad(
             loss,
-            encoder_params,
+            params,
             retain_graph=True,
             allow_unused=True,
         )
@@ -497,7 +496,7 @@ def _log_encoder_grad_sources(encoder_params, loss_dict, step_idx=0):
     if stats:
         parts = [f"{k}: |g|={v:.2e}" for k, v in stats.items()]
         from tqdm.auto import tqdm as _tqdm
-        _tqdm.write(f"[EncGradSources step={step_idx}] " + " | ".join(parts))
+        _tqdm.write(f"[{prefix} step={step_idx}] " + " | ".join(parts))
 
 def train_pldm(args):
     """Main training function for PLDM model"""
@@ -851,9 +850,9 @@ def train_pldm(args):
                     loss_contributions['same_page'] = args.lambda_dynamics * on_the_same_page_loss
                 if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
                     loss_contributions['variance'] = args.lambda_variance * variance_loss
-                # _log_encoder_grad_sources
                 if global_step % args.log_steps == 0:
-                    _log_encoder_grad_sources(encoder_params_list, loss_contributions, global_step)
+                    # Encoder gradients
+                    _log_encoder_grad_sources(encoder_params_list, loss_contributions, global_step, prefix="EncGradSources")
 
                 # Optimizer step
                 if amp_dtype == torch.float16:
@@ -995,14 +994,14 @@ def parse_args():
     parser.add_argument('--warmup_epochs_decoder', type=int, default=0, help='Number of epochs to train decoder')
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1e-4, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=1e-4, help='Weight for value loss')
+    parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
+    parser.add_argument('--lambda_value', type=float, default=1e-2, help='Weight for value loss')
     parser.add_argument('--lambda_recon', type=float, default=1e5, help='Weight for reconstruction loss during warm-up')
     parser.add_argument('--lambda_variance', type=float, default=1e1, help='Weight for encoder variance loss during warm-up')
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
+    parser.add_argument('--encoder_lr', type=float, default=5e-7, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e+1, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
+    parser.add_argument('--policy_lr', type=float, default=2e-1, help='Learning rate for policy')
     parser.add_argument('--decoder_lr', type=float, default=2e-4, help='Learning rate for decoder')
     
     # Precision parameters

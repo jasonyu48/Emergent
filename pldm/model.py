@@ -234,12 +234,22 @@ class NextGoalPredictor(nn.Module):
             ])
             self.residual_blocks.append(block)
         
-        # Output projection to features
+        # Policy-specific sub-network output projection
         self.output_proj = nn.Linear(hidden_dim, encoding_dim)
-        # Value head for state-value prediction
-        self.value_head = nn.Linear(hidden_dim, 1)
+
+        # ------------------------------------------------------------------
+        #  Independent value network (no parameter sharing with policy MLP)
+        # ------------------------------------------------------------------
+        self.value_mlp = nn.Sequential(
+            nn.Linear(encoding_dim, hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim//4),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim//4),
+            nn.Linear(hidden_dim//4, 1)
+        )
         
-        # Layer norm for residual connections
         self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(len(self.residual_blocks))])
         
         # For stochastic policy, we'll predict mean only
@@ -303,8 +313,7 @@ class NextGoalPredictor(nn.Module):
     # ------------------------------------------------------------------
     def value(self, z_t):
         """Predict state value V(z_t)."""
-        features = self._compute_features(z_t)
-        value = self.value_head(features).squeeze(-1)  # [B]
+        value = self.value_mlp(z_t).squeeze(-1)  # [B]
         return value
     
     def log_prob(self, z_t, z_sample):
