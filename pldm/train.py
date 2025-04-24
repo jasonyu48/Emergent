@@ -416,11 +416,12 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
             param_lr[id(p)] = lr
 
     stats = {}
-    def _add(comp, g, u):
+    def _add(comp, g, u, r):
         if comp not in stats:
-            stats[comp] = {'g': 0.0, 'u': 0.0, 'n': 0}
+            stats[comp] = {'g': 0.0, 'u': 0.0, 'r': 0.0, 'n': 0}
         stats[comp]['g'] += g
         stats[comp]['u'] += u
+        stats[comp]['r'] += r
         stats[comp]['n'] += 1
 
     for name, p in model.named_parameters():
@@ -437,17 +438,62 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
             comp = 'decoder'
 
         lr = param_lr.get(id(p), 0.0)
+        param_mean = p.abs().mean().item()
         grad_mean = p.grad.abs().mean().item()
         upd_mean = lr * grad_mean
-        _add(comp, grad_mean, upd_mean)
+        
+        # Calculate relative update (Δw/|w|)
+        # Use a small epsilon to avoid division by zero
+        rel_upd = upd_mean / (param_mean + 1e-8)
+        
+        _add(comp, grad_mean, upd_mean, rel_upd)
 
     parts = []
     for comp, d in stats.items():
         if d['n'] == 0:
             continue
-        parts.append(f"{comp}: g={d['g']/d['n']:.2e}, u={d['u']/d['n']:.2e}")
+        parts.append(f"{comp}: g={d['g']/d['n']:.2e}, u={d['u']/d['n']:.2e}, Δw/|w|={d['r']/d['n']:.2e}")
     if parts:
         print(f"[GradStats step={step_idx}] " + " | ".join(parts))
+
+# -----------------------------------------------------------------------------
+# Utility: log gradient contributions to encoder from individual loss terms
+# -----------------------------------------------------------------------------
+
+def _log_encoder_grad_sources(encoder_params, loss_dict, step_idx=0):
+    """Print mean |grad| on encoder params attributed to each loss term.
+
+    Args:
+        encoder_params: list of encoder parameters (with .requires_grad=True).
+        loss_dict: dict mapping loss_name -> loss_tensor (already scaled).
+        step_idx: global step index for logging purposes.
+    """
+    stats = {}
+    for name, loss in loss_dict.items():
+        if loss is None:
+            continue
+        # Compute grads w.r.t encoder params WITHOUT accumulating into .grad
+        grads = torch.autograd.grad(
+            loss,
+            encoder_params,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        # Compute mean absolute gradient across all encoder params
+        abs_means = []
+        for g in grads:
+            if g is None:
+                continue
+            abs_means.append(g.abs().mean())
+        if len(abs_means) == 0:
+            mean_grad = 0.0
+        else:
+            mean_grad = torch.stack(abs_means).mean().item()
+        stats[name] = mean_grad
+
+    if stats:
+        parts = [f"{k}: |g|={v:.2e}" for k, v in stats.items()]
+        print(f"[EncGradSources step={step_idx}] " + " | ".join(parts))
 
 def train_pldm(args):
     """Main training function for PLDM model"""
@@ -783,7 +829,7 @@ def train_pldm(args):
                             on_the_same_page_loss = on_the_same_page_loss / len(batch_states)
 
                     # Total loss
-                    loss = policy_loss + args.lambda_dynamics * dynamics_loss
+                    loss = args.lambda_policy * policy_loss + args.lambda_dynamics * dynamics_loss
                     if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
                         loss += args.lambda_recon * reconstruction_loss
                     
@@ -793,7 +839,24 @@ def train_pldm(args):
                     
                     if args.use_same_page_loss:
                         loss += args.lambda_dynamics * on_the_same_page_loss
-                
+
+                # --------------------------------------------------------
+                # Log encoder gradient sources BEFORE optimizer step
+                # --------------------------------------------------------
+                encoder_params_list = [p for p in model.encoder.parameters() if p.requires_grad]
+                loss_contributions = {
+                    'policy': args.lambda_policy * policy_loss,
+                    'dynamics': args.lambda_dynamics * dynamics_loss,
+                }
+                if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
+                    loss_contributions['recon'] = args.lambda_recon * reconstruction_loss
+                if args.use_next_state_loss:
+                    loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
+                if args.use_same_page_loss:
+                    loss_contributions['same_page'] = args.lambda_dynamics * on_the_same_page_loss
+
+                _log_encoder_grad_sources(encoder_params_list, loss_contributions, global_step)
+
                 # Backward pass with scaler for FP16 or regular backward for BF16/FP32
                 if amp_dtype == torch.float16:
                     # Use scaler for FP16 precision
@@ -907,21 +970,25 @@ def parse_args():
     parser.add_argument('--max_steps_per_episode', type=int, default=40, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lambda_dynamics', type=float, default=1000.0, help='Weight for dynamics loss')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=16, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
+
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
     parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', type=bool, default=True, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--warmup_epochs_decoder', type=int, default=15, help='Number of epochs to train decoder')
-    parser.add_argument('--lambda_recon', type=float, default=100000.0, help='Weight for reconstruction loss during warm-up')
+
+    
+    parser.add_argument('--lambda_dynamics', type=float, default=1.0, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_policy', type=float, default=1e-3, help='Weight for policy loss')
+    parser.add_argument('--lambda_recon', type=float, default=1e6, help='Weight for reconstruction loss during warm-up')
     
     # Optimizer parameters
-    parser.add_argument('--encoder_lr', type=float, default=5e-4, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=5e-3, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=5e-4, help='Learning rate for policy')
-    parser.add_argument('--decoder_lr', type=float, default=5e-3, help='Learning rate for decoder')
+    parser.add_argument('--encoder_lr', type=float, default=5e-10, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=5e-6, help='Learning rate for policy')
+    parser.add_argument('--decoder_lr', type=float, default=5e-6, help='Learning rate for decoder')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
