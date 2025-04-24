@@ -559,12 +559,18 @@ def train_pldm(args):
     if amp_dtype is not None:
         print(f"Model will use {amp_dtype} precision during forward pass")
     
-    # Create single optimizer with parameter groups for different learning rates
-    optimizer = optim.Adam([
-        {'params': model.encoder.parameters(), 'lr': args.encoder_lr},
-        {'params': model.dynamics.parameters(), 'lr': args.dynamics_lr},
-        {'params': model.next_goal_predictor.parameters(), 'lr': args.policy_lr},
-        {'params': model.decoder.parameters(), 'lr': args.decoder_lr}
+    # ---------------------------------------------------------------
+    # Separate parameter groups: encoder, dynamics, policy-net, value-net, decoder
+    # ---------------------------------------------------------------
+    policy_params = [p for n, p in model.next_goal_predictor.named_parameters() if not n.startswith('value_mlp')]
+    value_params = list(model.next_goal_predictor.value_mlp.parameters())
+
+    optimizer = optim.AdamW([
+        {'params': model.encoder.parameters(),           'lr': args.encoder_lr},
+        {'params': model.dynamics.parameters(),          'lr': args.dynamics_lr},
+        {'params': policy_params,                        'lr': args.policy_lr},
+        {'params': value_params,                         'lr': args.value_lr},
+        {'params': model.decoder.parameters(),           'lr': args.decoder_lr},
     ])
     
     # Create learning rate schedulers
@@ -572,10 +578,11 @@ def train_pldm(args):
     def adjust_learning_rates(epoch):
         """Adjust learning rates based on epoch and component"""
         # Get base learning rates from parameter groups
-        encoder_lr = optimizer.param_groups[0]['lr']
+        encoder_lr  = optimizer.param_groups[0]['lr']
         dynamics_lr = optimizer.param_groups[1]['lr']
-        policy_lr = optimizer.param_groups[2]['lr']
-        decoder_lr = optimizer.param_groups[3]['lr']
+        policy_lr   = optimizer.param_groups[2]['lr']
+        value_lr    = optimizer.param_groups[3]['lr']
+        decoder_lr  = optimizer.param_groups[4]['lr']
         
         # # Apply encoder LR schedule: reduce to 1/3 after the first epoch
         # if epoch == 1:
@@ -589,9 +596,10 @@ def train_pldm(args):
         optimizer.param_groups[0]['lr'] = encoder_lr
         optimizer.param_groups[1]['lr'] = dynamics_lr
         optimizer.param_groups[2]['lr'] = policy_lr
-        optimizer.param_groups[3]['lr'] = decoder_lr
+        optimizer.param_groups[3]['lr'] = value_lr
+        optimizer.param_groups[4]['lr'] = decoder_lr
         
-        return encoder_lr, dynamics_lr, policy_lr, decoder_lr
+        return encoder_lr, dynamics_lr, policy_lr, value_lr, decoder_lr
     
     # Check if resume from checkpoint
     start_epoch = 0
@@ -667,15 +675,16 @@ def train_pldm(args):
             num_episodes = 0
 
             # Adjust learning rates for this epoch
-            encoder_lr, dynamics_lr, policy_lr, decoder_lr = adjust_learning_rates(epoch)
+            encoder_lr, dynamics_lr, policy_lr, value_lr, decoder_lr = adjust_learning_rates(epoch)
 
             # Log current learning rates
             print(f"Epoch {epoch+1}/{args.epochs} - Learning rates: Encoder={encoder_lr:.2e}, "
-                  f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Decoder={decoder_lr:.2e}")
+                  f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Value={value_lr:.2e}, Decoder={decoder_lr:.2e}")
                   
             writer.add_scalar('LearningRate/encoder', encoder_lr, epoch)
             writer.add_scalar('LearningRate/dynamics', dynamics_lr, epoch)
             writer.add_scalar('LearningRate/policy', policy_lr, epoch)
+            writer.add_scalar('LearningRate/value', value_lr, epoch)
             writer.add_scalar('LearningRate/decoder', decoder_lr, epoch)
 
             # ------------------------------------------------------------------
@@ -769,7 +778,7 @@ def train_pldm(args):
                             reconstruction_loss += F.mse_loss(recon, target_img)
 
                         # Policy log-prob
-                        log_prob = model.next_goal_predictor.log_prob(z_t, next_goal.unsqueeze(0))
+                        log_prob = model.next_goal_predictor.log_prob(z_t.detach(), next_goal.unsqueeze(0))
                         policy_log_probs.append(log_prob.squeeze(0))
 
                         # Value prediction
@@ -972,8 +981,8 @@ def parse_args():
     
     # Model parameters
     parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
-    parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
-    parser.add_argument('--encoder_embedding', type=int, default=256, help='Dimension of encoder embedding')
+    parser.add_argument('--hidden_dim', type=int, default=256, help='Dimension of hidden layers')
+    parser.add_argument('--encoder_embedding', type=int, default=128, help='Dimension of encoder embedding')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
@@ -995,14 +1004,15 @@ def parse_args():
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=1e-2, help='Weight for value loss')
+    parser.add_argument('--lambda_value', type=float, default=8e-5, help='Weight for value loss') # 1e-4 to make the scale of gradient similar to dynamics
     parser.add_argument('--lambda_recon', type=float, default=1e5, help='Weight for reconstruction loss during warm-up')
     parser.add_argument('--lambda_variance', type=float, default=1e1, help='Weight for encoder variance loss during warm-up')
 
-    parser.add_argument('--encoder_lr', type=float, default=5e-7, help='Learning rate for encoder')
+    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e+1, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=2e-1, help='Learning rate for policy')
-    parser.add_argument('--decoder_lr', type=float, default=2e-4, help='Learning rate for decoder')
+    parser.add_argument('--policy_lr', type=float, default=0.5, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=1e-1, help='Learning rate for value')
+    parser.add_argument('--decoder_lr', type=float, default=5e-4, help='Learning rate for decoder')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')

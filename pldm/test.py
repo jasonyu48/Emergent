@@ -358,7 +358,7 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         in_channels=3,
         encoding_dim=32,  # Updated to match training default
         action_dim=2,
-        hidden_dim=512,    # Updated to match new architecture
+        hidden_dim=256,    # Updated to match new architecture
         encoder_embedding=encoder_embedding  # Use encoder_embedding parameter
     ).to(device)
     
@@ -507,7 +507,7 @@ def parse_args():
     parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 precision for evaluation')
-    parser.add_argument('--encoder_embedding', type=int, default=256, help='Dimension of encoder embedding')
+    parser.add_argument('--encoder_embedding', type=int, default=128, help='Dimension of encoder embedding')
     
     return parser.parse_args()
 

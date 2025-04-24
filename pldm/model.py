@@ -251,7 +251,7 @@ class NextGoalPredictor(nn.Module):
         )
         
         self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(len(self.residual_blocks))])
-        
+
         # For stochastic policy, we'll predict mean only
         self.mean = nn.Linear(encoding_dim, encoding_dim)
         # Use fixed log_std of 0 instead of learnable parameter
