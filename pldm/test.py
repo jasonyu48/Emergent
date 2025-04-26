@@ -503,8 +503,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
     # Model path and output directory
-    parser.add_argument('--model_path', type=str, default='output_clip_correct_loss_scale5/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='test_output_clip_correct_loss_scale5', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_clip_correct_loss_scale6/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='test_output_clip_correct_loss_scale6', help='Directory to save test results')
     
     # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
@@ -516,7 +516,7 @@ def parse_args():
     # Action parameters
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
-    parser.add_argument('--use_quadrant', type=bool, default=False, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
+    parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
     
     # Model architecture parameters
     parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')

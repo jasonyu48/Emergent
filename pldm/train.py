@@ -62,7 +62,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     distance_reward = -distance  # Negative distance as reward
     same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
-    return distance_reward + same_room_bonus + 30
+    return distance_reward + same_room_bonus + 64
 
 
 def compute_returns(rewards, gamma=0.99):
@@ -792,6 +792,19 @@ def train_pldm(args):
                     # ---------------- losses ----------------
                     dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
 
+                    # ------------------------------------------------------------------
+                    #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
+                    # ------------------------------------------------------------------
+                    avg_mag_z_t         = Z_t.norm(dim=-1).mean().item()
+                    avg_mag_z_next_pred = Z_next_pred.norm(dim=-1).mean().item()
+                    avg_mag_ng_store    = NG_store.norm(dim=-1).mean().item()
+
+                    if global_step % args.log_steps == 0:
+                        from tqdm.auto import tqdm as _tqdm
+                        _tqdm.write(
+                             f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
+                        )
+
                     # Next-state / same-page optional losses
                     next_state_loss = torch.tensor(0.0, device=device)
                     if args.use_same_page_loss:
@@ -889,6 +902,9 @@ def train_pldm(args):
                     writer.add_scalar('Clip/z_next_pred', clip_z_next_pred.item(), global_step)
                     writer.add_scalar('Clip/pseudo_goal', clip_pseudo_goal.item(), global_step)
                 writer.add_scalar('Reward/individual_episode', batch_returns[0], global_step)
+                writer.add_scalar('Stats/mag_z_t', avg_mag_z_t, global_step)
+                writer.add_scalar('Stats/mag_z_next_pred', avg_mag_z_next_pred, global_step)
+                writer.add_scalar('Stats/mag_ng_store', avg_mag_ng_store, global_step)
 
                 # ---------------- aggregate epoch-level stats -----------------
                 total_policy_loss += policy_loss.item()
@@ -1008,7 +1024,7 @@ def parse_args():
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
     parser.add_argument('--lambda_clip', type=float, default=1e-1, help='Weight for clip loss') #was 1e-1. we don't use it now.
-    parser.add_argument('--lambda_policy_clip', type=float, default=0, help='Weight for clip loss specifically on policy network') #1e0
+    parser.add_argument('--lambda_policy_clip', type=float, default=1e0, help='Weight for clip loss specifically on policy network') #1e0
 
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')

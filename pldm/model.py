@@ -248,7 +248,7 @@ class NextGoalPredictor(nn.Module):
         # For stochastic policy, we'll predict mean only
         self.mean = nn.Linear(encoding_dim, encoding_dim)
         # Learnable log-std parameter (per latent dim)
-        self.log_std = nn.Parameter(torch.zeros(encoding_dim))
+        # self.log_std = nn.Parameter(torch.zeros(encoding_dim))
         
         # Initialize weights using Kaiming initialization
         self.apply(self._init_weights)
@@ -268,7 +268,8 @@ class NextGoalPredictor(nn.Module):
         mean = self.mean(x)
         
         # Create distribution with fixed std of 1.0 (since log(1.0) = 0.0)
-        std = torch.exp(self.log_std).unsqueeze(0).expand_as(mean)
+        # std = torch.exp(self.log_std).unsqueeze(0).expand_as(mean)
+        std = torch.ones_like(mean)
         dist = Normal(mean, std)
         
         # Sample next goal
@@ -298,7 +299,8 @@ class NextGoalPredictor(nn.Module):
         x = self._compute_features(z_t)
         x = self.output_proj(x)
         mean = self.mean(x)
-        std = torch.exp(self.log_std).unsqueeze(0).expand_as(mean)
+        # std = torch.exp(self.log_std).unsqueeze(0).expand_as(mean)
+        std = torch.ones_like(mean)
         return Normal(mean, std)
     
     # ------------------------------------------------------------------
