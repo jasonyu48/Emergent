@@ -1,0 +1,50 @@
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
+
+    parser.add_argument('--lambda_recon', type=float, default=1e5, help='Weight for reconstruction loss during warm-up')
+    parser.add_argument('--lambda_variance', type=float, default=1e1, help='Weight for encoder variance loss during warm-up')
+    
+    # Model parameters
+    parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
+    parser.add_argument('--hidden_dim', type=int, default=256, help='Dimension of hidden layers')
+    parser.add_argument('--encoder_embedding', type=int, default=128, help='Dimension of encoder embedding')
+    
+    # Training parameters
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
+    parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
+    parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
+    parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
+    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+    parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
+    parser.add_argument('--num_workers', type=int, default=2, help='Number of parallel workers for episode collection')
+    parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
+    parser.add_argument('--log_steps', type=int, default=16, help='Logging frequency for gradient statistics')
+
+    parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
+    parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
+    parser.add_argument('--use_decoder_loss', type=bool, default=False, help='Enable decoder reconstruction warm-up loss')
+    parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
+    parser.add_argument('--warmup_epochs_decoder', type=int, default=0, help='Number of epochs to train decoder')
+    
+    parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_policy', type=float, default=1e2, help='Weight for policy loss')
+    parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
+    parser.add_argument('--lambda_clip', type=float, default=0.1, help='Weight for clip loss')
+    parser.add_argument('--lambda_policy_clip', type=float, default=1e-3, help='Weight for clip loss specifically on policy network')
+
+    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-2, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=0.5, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=1e-2, help='Learning rate for value')
+    parser.add_argument('--decoder_lr', type=float, default=5e-4, help='Learning rate for decoder')
+    
+    # Precision parameters
+    parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
+    
+    # Other parameters
+    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
+                        help='Device to run training on')
+    parser.add_argument('--output_dir', type=str, default='output_clip_correct_loss_scale3', help='Directory to save model and logs')
+    parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')

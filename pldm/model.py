@@ -62,9 +62,6 @@ class ViTEncoder(nn.Module):
             nn.Linear(embedding_dim // 4, encoding_dim)
         )
         
-        # Final layer norm for encoded representation
-        self.final_ln = nn.LayerNorm(encoding_dim)
-        
         # Initialize weights
         self.apply(self._init_weights)
     
@@ -118,9 +115,6 @@ class ViTEncoder(nn.Module):
         # Project from embedding_dim to encoding_dim
         encoding = self.projection(cls_embedding)
         
-        # Apply final layer normalization
-        encoding = self.final_ln(encoding)
-        
         return encoding
 
 
@@ -150,9 +144,8 @@ class DynamicsModel(nn.Module):
             ])
             self.residual_blocks.append(block)
         
-        # Output projection followed by optional LayerNorm to stabilise scale
+        # Output projection (layer norm removed)
         self.output_proj = nn.Linear(hidden_dim, encoding_dim)
-        self.output_ln = nn.LayerNorm(encoding_dim)
         
         # Layer norm for residual connections
         self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(len(self.residual_blocks))])
@@ -203,8 +196,8 @@ class DynamicsModel(nn.Module):
             # Add residual connection and normalize
             x = layer_norm(x + residual)
         
-        # Apply output projection and layer normalisation
-        z_next = self.output_ln(self.output_proj(x))
+        # Apply output projection (no layer norm)
+        z_next = self.output_proj(x)
         
         return z_next
 
@@ -254,8 +247,8 @@ class NextGoalPredictor(nn.Module):
 
         # For stochastic policy, we'll predict mean only
         self.mean = nn.Linear(encoding_dim, encoding_dim)
-        # Use fixed log_std of 0 instead of learnable parameter
-        self.log_std = 0.0
+        # Learnable log-std parameter (per latent dim)
+        self.log_std = nn.Parameter(torch.zeros(encoding_dim))
         
         # Initialize weights using Kaiming initialization
         self.apply(self._init_weights)
@@ -275,7 +268,7 @@ class NextGoalPredictor(nn.Module):
         mean = self.mean(x)
         
         # Create distribution with fixed std of 1.0 (since log(1.0) = 0.0)
-        std = torch.ones_like(mean)
+        std = torch.exp(self.log_std).unsqueeze(0).expand_as(mean)
         dist = Normal(mean, std)
         
         # Sample next goal
@@ -305,7 +298,7 @@ class NextGoalPredictor(nn.Module):
         x = self._compute_features(z_t)
         x = self.output_proj(x)
         mean = self.mean(x)
-        std = torch.ones_like(mean)
+        std = torch.exp(self.log_std).unsqueeze(0).expand_as(mean)
         return Normal(mean, std)
     
     # ------------------------------------------------------------------
@@ -387,7 +380,7 @@ class PLDMModel(nn.Module):
         self.dynamics = DynamicsModel(
             encoding_dim=encoding_dim,
             action_dim=action_dim,
-            hidden_dim=hidden_dim
+            hidden_dim= hidden_dim
         )
         
         self.next_goal_predictor = NextGoalPredictor(
@@ -419,8 +412,18 @@ class PLDMModel(nn.Module):
         """Predict next state given current encoded state and action"""
         return self.dynamics(z_t, a_t)
     
-    def search_action(self, z_t, z_target, verbose=False, max_step_norm=15, num_samples=100):
-        """Search for the action that leads from z_t to z_target using parallel sampling"""
+    def search_action(self, z_t, z_target, verbose=False, max_step_norm=15, num_samples=100, use_quadrant=True):
+        """Search for the action that leads from z_t to z_target using parallel sampling
+        
+        Args:
+            z_t: Current encoded state
+            z_target: Target encoded state
+            verbose: Whether to print debug information
+            max_step_norm: Maximum step norm for sampled actions
+            num_samples: Number of action samples to evaluate
+            use_quadrant: If True, sample actions from a single random quadrant.
+                          If False, sample from the full action space.
+        """
         # Keep track of device and dtype
         dtype = z_t.dtype
         device = z_t.device
@@ -432,32 +435,46 @@ class PLDMModel(nn.Module):
             print(f"Starting parallel action search with {num_samples} samples")
             print(f"z_t shape: {z_t.shape}, dtype: {dtype}")
             print(f"z_target shape: {z_target.shape}, dtype: {dtype}")
+            print(f"Sampling from {'quadrant' if use_quadrant else 'full action space'}")
         
         # Ensure inputs are detached to avoid gradient tracking
         z_t = z_t.detach()
         z_target = z_target.detach()
 
-        # ------------------------------------------------------------------
-        # Quadrant‑based sampling instead of full‑space sampling
-        # ------------------------------------------------------------------
-        # We first pick one of the four quadrants of the 2‑D action space and
-        # then sample **at most** 100 actions uniformly inside that quadrant.
-        # This adds structured randomness that has proven useful for training
-        # the dynamics model while keeping the search budget low.
-        # ------------------------------------------------------------------
+        # Sample actions either from a quadrant or from full space
+        if use_quadrant:
+            # ------------------------------------------------------------------
+            # Quadrant‑based sampling instead of full‑space sampling
+            # ------------------------------------------------------------------
+            # We first pick one of the four quadrants of the 2‑D action space and
+            # then sample **at most** 100 actions uniformly inside that quadrant.
+            # This adds structured randomness that has proven useful for training
+            # the dynamics model while keeping the search budget low.
+            # ------------------------------------------------------------------
 
-        # Pick a random quadrant (0:(+,+), 1:(+,-), 2:(-,+), 3:(-,-))
-        quadrant = torch.randint(0, 4, (1,), device=device).item()
-        sign_x = 1.0 if quadrant in (0, 1) else -1.0  # Q0 & Q1 have +x
-        sign_y = 1.0 if quadrant in (0, 2) else -1.0  # Q0 & Q2 have +y
+            # Pick a random quadrant (0:(+,+), 1:(+,-), 2:(-,+), 3:(-,-))
+            quadrant = torch.randint(0, 4, (1,), device=device).item()
+            sign_x = 1.0 if quadrant in (0, 1) else -1.0  # Q0 & Q1 have +x
+            sign_y = 1.0 if quadrant in (0, 2) else -1.0  # Q0 & Q2 have +y
 
-        # Sample actions uniformly in [0, max_step_norm] then assign signs
-        sampled_actions = (
-            torch.rand(batch_size, num_samples, self.action_dim,
-                       device=device, dtype=dtype) * max_step_norm
-        )
-        sampled_actions[..., 0] *= sign_x
-        sampled_actions[..., 1] *= sign_y
+            # Sample actions uniformly in [0, max_step_norm] then assign signs
+            sampled_actions = (
+                torch.rand(batch_size, num_samples, self.action_dim,
+                          device=device, dtype=dtype) * max_step_norm
+            )
+            sampled_actions[..., 0] *= sign_x
+            sampled_actions[..., 1] *= sign_y
+        else:
+            # ------------------------------------------------------------------
+            # Full action space sampling
+            # ------------------------------------------------------------------
+            # Sample from the full action space uniformly within [-max_step_norm, max_step_norm]
+            # This gives more exploration capability but less structure
+            # ------------------------------------------------------------------
+            sampled_actions = (
+                torch.rand(batch_size, num_samples, self.action_dim,
+                          device=device, dtype=dtype) * 2 * max_step_norm - max_step_norm
+            )
 
         # Expand z_t / z_target to match the sampled actions
         expanded_z_t = z_t.unsqueeze(1).expand(-1, num_samples, -1)

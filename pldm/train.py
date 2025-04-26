@@ -83,7 +83,7 @@ def compute_returns(rewards, gamma=0.99):
     return returns
 
 
-def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100):
+def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100, use_quadrant=True):
     """Perform a single rollout in the environment using the PLDM model"""
     # Reset environment
     obs, info = env.reset()
@@ -172,7 +172,8 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
         a_t = model.search_action(
             z_t_detached.to(dtype), 
             z_next_detached.to(dtype), 
-            num_samples=num_samples
+            num_samples=num_samples,
+            use_quadrant=use_quadrant
         )
 
         # Take action in environment
@@ -266,7 +267,7 @@ class ParallelEpisodeCollector:
     """Collect episodes in parallel for faster training"""
     
     def __init__(self, model, env_creator, max_steps, device, bf16_supported, 
-                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, num_samples=100):
+                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, num_samples=100, use_quadrant=True):
         """
         Initialize parallel episode collector
         
@@ -280,6 +281,7 @@ class ParallelEpisodeCollector:
             prefetch_queue_size: Size of the prefetch queue for episodes
             use_gpu_for_inference: Whether to use GPU for inference during rollout
             num_samples: Number of action samples to evaluate in parallel
+            use_quadrant: Whether to use quadrant-based action sampling
         """
         self.model = model
         self.env_creator = env_creator
@@ -289,6 +291,7 @@ class ParallelEpisodeCollector:
         self.num_workers = num_workers
         self.use_gpu_for_inference = use_gpu_for_inference
         self.num_samples = num_samples
+        self.use_quadrant = use_quadrant
         
         # Create worker environments
         self.envs = [env_creator() for _ in range(num_workers)]
@@ -344,7 +347,8 @@ class ParallelEpisodeCollector:
                             max_steps=self.max_steps,
                             device=self.device,  # Use GPU for inference
                             bf16=self.bf16_supported,
-                            num_samples=self.num_samples
+                            num_samples=self.num_samples,
+                            use_quadrant=self.use_quadrant
                         )
                 else:
                     # Create a CPU copy for inference (original behavior)
@@ -356,7 +360,8 @@ class ParallelEpisodeCollector:
                         max_steps=self.max_steps,
                         device='cpu',  # Use CPU for inference
                         bf16=False,    # Use FP32 on CPU for stability
-                        num_samples=self.num_samples
+                        num_samples=self.num_samples,
+                        use_quadrant=self.use_quadrant
                     )
                 
                 # Skip empty trajectories
@@ -635,6 +640,7 @@ def train_pldm(args):
     # Determine number of data loader workers based on CPU cores
     num_workers = min(args.num_workers if hasattr(args, 'num_workers') else 4, max(1, (multiprocessing.cpu_count() - 1) // 2))
     print(f"Using {num_workers} parallel workers for episode collection")
+    print(f"Action sampling strategy: {'quadrant-based' if args.use_quadrant else 'full action space'}")
 
     # ---------------------------------------------------------------------
     # Sanity check: batch_size must divide (num_workers * max_steps_per_episode)
@@ -657,7 +663,8 @@ def train_pldm(args):
         bf16_supported=bf16_supported,
         num_workers=num_workers,
         use_gpu_for_inference=args.use_gpu_inference,  # Use GPU for inference since we have a powerful A100
-        num_samples=args.num_samples
+        num_samples=args.num_samples,
+        use_quadrant=args.use_quadrant
     )
 
     try:
@@ -672,6 +679,10 @@ def train_pldm(args):
             total_reconstruction_loss = 0
             total_variance_loss = 0
             total_value_loss = 0
+            total_clip_loss = 0
+            total_clip_z_t = 0
+            total_clip_z_next_pred = 0
+            total_clip_pseudo_goal = 0
             num_episodes = 0
 
             # Adjust learning rates for this epoch
@@ -753,115 +764,102 @@ def train_pldm(args):
                 batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
 
                 with torch.amp.autocast('cuda', enabled=amp_dtype is not None, dtype=amp_dtype):
-                    policy_log_probs = []
-                    dynamics_loss = 0.0
-                    next_state_loss = 0.0
-                    on_the_same_page_loss = 0.0
-                    reconstruction_loss = 0.0
-                    variance_loss = 0.0
-                    value_loss = 0.0
+                    # --------------------------------------------------------
+                    # Vectorised computation over the whole batch
+                    # --------------------------------------------------------
 
-                    # Keep all z_t to compute batch variance later
-                    batch_encodings = []
+                    # Stack tensors
+                    S_t = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
+                                      for s in batch_states]).float().detach()
+                    S_next = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
+                                         for s in batch_next_states]).float().detach()
+                    A_t = torch.stack(batch_actions).to(device).float().detach()
+                    NG_store = torch.stack(batch_next_goals).to(device).float().detach()
 
-                    for state, next_state, action, next_goal in zip(batch_states, batch_next_states, batch_actions, batch_next_goals):
-                        z_t = model.encode(state.unsqueeze(0))
-                        z_next_actual = model.encode(next_state.unsqueeze(0))
+                    # Encode in one shot
+                    Z_t = model.encode(S_t)
+                    Z_next_actual = model.encode(S_next)
 
-                        # Accumulate z_t for variance computation
-                        batch_encodings.append(z_t.squeeze(0))
+                    # Policy log-prob (no grad through stored goal)
+                    log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
-                        # Decoder warm-up reconstruction loss
-                        if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
-                            recon = model.decode(z_t)
-                            target_img = state.unsqueeze(0) / 255.0 if state.max() > 1.0 else state.unsqueeze(0)
-                            reconstruction_loss += F.mse_loss(recon, target_img)
+                    # Value prediction
+                    V_pred = model.next_goal_predictor.value(Z_t.detach())  # detach to avoid encoder grads
 
-                        # Policy log-prob
-                        log_prob = model.next_goal_predictor.log_prob(z_t.detach(), next_goal.unsqueeze(0))
-                        policy_log_probs.append(log_prob.squeeze(0))
+                    # Dynamics prediction
+                    Z_next_pred = model.dynamics(Z_t.detach(),A_t)
 
-                        # Value prediction
-                        value_pred = model.next_goal_predictor.value(z_t).squeeze(0)
-                        value_loss += F.mse_loss(value_pred, torch.tensor(R_t, device=device, dtype=value_pred.dtype))
+                    # ---------------- losses ----------------
+                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
 
-                        # Dynamics prediction
-                        a_t = action.unsqueeze(0)
-                        z_next_pred = model.dynamics(z_t, a_t)
-                        dynamics_loss += F.mse_loss(z_next_pred, z_next_actual)
-
-                        if args.use_next_state_loss:
-                            next_state_loss += 0  # placeholder
-                        if args.use_same_page_loss:
-                            on_the_same_page_loss += F.mse_loss(next_goal, z_next_pred)
-
-                    # Average losses over batch transitions (those accumulated inside loop)
-                    dynamics_loss = dynamics_loss / len(batch_states)
-                    if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
-                        reconstruction_loss = reconstruction_loss / len(batch_states)
-                    if args.use_next_state_loss:
-                        next_state_loss = next_state_loss / len(batch_states)
+                    # Next-state / same-page optional losses
+                    next_state_loss = torch.tensor(0.0, device=device)
                     if args.use_same_page_loss:
-                        on_the_same_page_loss = on_the_same_page_loss / len(batch_states)
+                        on_the_same_page_loss = F.mse_loss(NG_store, Z_next_pred)
+                    else:
+                        on_the_same_page_loss = torch.tensor(0.0, device=device)
 
-                    # ------------------------------------------------------------------
-                    # Variance regularization (VICReg-style): encourage each latent dim to
-                    # have std ≥ 1 across the batch. Penalise only during warm-up.
-                    # ------------------------------------------------------------------
-                    if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
-                        enc_stack = torch.stack(batch_encodings, dim=0)  # [B, D]
-                        enc_stack = F.normalize(enc_stack, p=2, dim=1)     # unit-norm vectors
-                        var = enc_stack.var(dim=0, unbiased=False) + 1e-4
-                        std = torch.sqrt(var)
-                        variance_loss = F.relu(1.0 - std).mean()
+                    # Pseudo goal for clip penalty (keeps grad to policy net)
+                    pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
 
-                    # --------------------- Value head & policy advantage ------------------
-                    enc_stack = torch.stack(batch_encodings, dim=0)  # [B, D]
-                    value_preds_batch = model.next_goal_predictor.value(enc_stack)
+                    # Clip penalties
+                    margin = 4.0
+                    clip_z_t          = F.relu(Z_t.abs() - margin).mean()
+                    clip_z_next_pred  = F.relu(Z_next_pred.abs() - margin).mean()
+                    clip_pseudo_goal  = F.relu(pseudo_next_goal.abs() - margin).mean()
 
-                    # Advantage = R - V (detach V for policy gradient)
-                    advantage = batch_returns_tensor - value_preds_batch.detach()
-                    # Normalize advantage
-                    adv_mean = advantage.mean()
-                    adv_std = advantage.std(unbiased=False) + 1e-8
-                    norm_advantage = (advantage - adv_mean) / adv_std
-                    policy_log_probs_tensor = torch.stack(policy_log_probs)
-                    policy_loss = -(policy_log_probs_tensor * norm_advantage).mean()
+                    # Aggregate (policy clip scaled separately)
+                    clip_loss = (
+                        clip_z_t +
+                        clip_z_next_pred +
+                        clip_pseudo_goal * args.lambda_policy_clip
+                    )
 
-                    # Value loss (MSE)
-                    value_loss = F.mse_loss(value_preds_batch, batch_returns_tensor)
+                    # Advantage / policy loss
+                    advantage = batch_returns_tensor - V_pred  # V_pred detached above
+                    norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
+                    policy_loss = -(log_probs * norm_advantage).mean()
+
+                    # Value loss
+                    value_loss = F.mse_loss(V_pred, batch_returns_tensor)
 
                     # Total loss
-                    loss = args.lambda_policy * policy_loss + args.lambda_dynamics * dynamics_loss
-                    if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
-                        loss += args.lambda_recon * reconstruction_loss
-                    if args.use_next_state_loss:
-                        loss += args.lambda_dynamics * next_state_loss
-                    if args.use_same_page_loss:
-                        loss += args.lambda_dynamics * on_the_same_page_loss
-                    if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
-                        loss += args.lambda_variance * variance_loss
-                    if args.use_value_loss:
-                        loss += args.lambda_value * value_loss
+                    loss = args.lambda_policy * policy_loss + args.lambda_dynamics * dynamics_loss + args.lambda_value * value_loss + args.lambda_clip * clip_loss + next_state_loss + on_the_same_page_loss
 
                 # Log encoder grad sources
                 encoder_params_list = [p for p in model.encoder.parameters() if p.requires_grad]
                 loss_contributions = {
                     'policy': args.lambda_policy * policy_loss,
                     'dynamics': args.lambda_dynamics * dynamics_loss,
-                    'value': args.lambda_value * value_loss if args.use_value_loss else 0.0,
                 }
-                if epoch < args.warmup_epochs_decoder and args.use_decoder_loss:
-                    loss_contributions['recon'] = args.lambda_recon * reconstruction_loss
+                # Value loss contribution (optional)
+                if args.use_value_loss and args.lambda_value > 0:
+                    loss_contributions['value'] = args.lambda_value * value_loss
+                else:
+                    loss_contributions['value'] = None
+
+                # Clip contribution (optional)
+                if args.lambda_clip > 0:
+                    loss_contributions['clip'] = args.lambda_clip * clip_loss
+                else:
+                    loss_contributions['clip'] = None
+
                 if args.use_next_state_loss:
                     loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
                 if args.use_same_page_loss:
                     loss_contributions['same_page'] = args.lambda_dynamics * on_the_same_page_loss
-                if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
-                    loss_contributions['variance'] = args.lambda_variance * variance_loss
+
                 if global_step % args.log_steps == 0:
                     # Encoder gradients
                     _log_encoder_grad_sources(encoder_params_list, loss_contributions, global_step, prefix="EncGradSources")
+
+                    # Policy network gradients (all params excluding value_mlp)
+                    policy_params_list = [p for n,p in model.next_goal_predictor.named_parameters() if not n.startswith('value_mlp')]
+                    _log_encoder_grad_sources(policy_params_list, loss_contributions, global_step, prefix="PolicyGradSources")
+
+                    # Dynamics model gradients
+                    dynamics_params_list = list(model.dynamics.parameters())
+                    _log_encoder_grad_sources(dynamics_params_list, loss_contributions, global_step, prefix="DynamicsGradSources")
 
                 # Optimizer step
                 if amp_dtype == torch.float16:
@@ -882,13 +880,14 @@ def train_pldm(args):
                     writer.add_scalar('Loss/next_state', next_state_loss.item(), global_step)
                 if args.use_same_page_loss:
                     writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
-                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
-                    writer.add_scalar('Loss/reconstruction', reconstruction_loss.item(), global_step)
-                if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
-                    writer.add_scalar('Loss/variance', variance_loss.item(), global_step)
                 if args.use_value_loss:
                     writer.add_scalar('Loss/value', value_loss.item(), global_step)
-                writer.add_scalar('Loss/total', loss.item(), global_step)
+                if args.lambda_clip >= 0:
+                    writer.add_scalar('Loss/clip', clip_loss.item(), global_step)
+                    # Per-component clip losses
+                    writer.add_scalar('Clip/z_t', clip_z_t.item(), global_step)
+                    writer.add_scalar('Clip/z_next_pred', clip_z_next_pred.item(), global_step)
+                    writer.add_scalar('Clip/pseudo_goal', clip_pseudo_goal.item(), global_step)
                 writer.add_scalar('Reward/individual_episode', batch_returns[0], global_step)
 
                 # ---------------- aggregate epoch-level stats -----------------
@@ -898,13 +897,13 @@ def train_pldm(args):
                     total_next_state_loss += next_state_loss.item()
                 if args.use_same_page_loss:
                     total_on_the_same_page_loss += on_the_same_page_loss.item()
-                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
-                    total_reconstruction_loss += reconstruction_loss.item()
-                if epoch < args.warmup_epochs_decoder and args.lambda_variance > 0:
-                    # accumulate for reporting
-                    pass  # variance loss is diagnostic; not included in epoch stats for now
                 if args.use_value_loss:
                     total_value_loss += value_loss.item()
+                if args.lambda_clip >= 0:
+                    total_clip_loss += clip_loss.item()
+                    total_clip_z_t += clip_z_t.item()
+                    total_clip_z_next_pred += clip_z_next_pred.item()
+                    total_clip_pseudo_goal += clip_pseudo_goal.item()
 
                 # ----------------------------------------------------------------
                 global_step += 1
@@ -934,13 +933,16 @@ def train_pldm(args):
                     avg_on_the_same_page_loss = total_on_the_same_page_loss / num_episodes
                     report += f", Avg On-Same-Page Loss: {avg_on_the_same_page_loss:.4f}"
                 
-                if args.use_decoder_loss and epoch < args.warmup_epochs_decoder:
-                    avg_reconstruction_loss = total_reconstruction_loss / num_episodes
-                    report += f", Avg Reconstruction Loss: {avg_reconstruction_loss:.4f}"
-                
                 if args.use_value_loss:
                     avg_value_loss = total_value_loss / num_episodes
                     report += f", Avg Value Loss: {avg_value_loss:.4f}"
+                
+                if args.lambda_clip >= 0:
+                    avg_clip_loss = total_clip_loss / args.updates_per_epoch
+                    avg_clip_z_t = total_clip_z_t / args.updates_per_epoch
+                    avg_clip_z_next = total_clip_z_next_pred / args.updates_per_epoch
+                    avg_clip_pseudo = total_clip_pseudo_goal / args.updates_per_epoch
+                    report += f", Avg Clip Loss: {avg_clip_loss:.4f} (z_t={avg_clip_z_t:.4f}, z_next={avg_clip_z_next:.4f}, pseudo={avg_clip_pseudo:.4f})"
                 
                 print(report)
                 
@@ -981,37 +983,37 @@ def parse_args():
     
     # Model parameters
     parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='Dimension of hidden layers')
-    parser.add_argument('--encoder_embedding', type=int, default=128, help='Dimension of encoder embedding')
+    parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
+    parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
-    parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
+    parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
-    parser.add_argument('--num_workers', type=int, default=16, help='Number of parallel workers for episode collection')
+    parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=16, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=32, help='Logging frequency for gradient statistics')
+    parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
     parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', type=bool, default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
-    parser.add_argument('--warmup_epochs_decoder', type=int, default=0, help='Number of epochs to train decoder')
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=8e-5, help='Weight for value loss') # 1e-4 to make the scale of gradient similar to dynamics
-    parser.add_argument('--lambda_recon', type=float, default=1e5, help='Weight for reconstruction loss during warm-up')
-    parser.add_argument('--lambda_variance', type=float, default=1e1, help='Weight for encoder variance loss during warm-up')
+    parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
+    parser.add_argument('--lambda_clip', type=float, default=1e-1, help='Weight for clip loss') #was 1e-1. we don't use it now.
+    parser.add_argument('--lambda_policy_clip', type=float, default=0, help='Weight for clip loss specifically on policy network') #1e0
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e+1, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=0.5, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-1, help='Learning rate for value')
+    parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=1e-2, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=5e-3, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=5e-4, help='Learning rate for decoder')
     
     # Precision parameters
@@ -1020,7 +1022,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_v', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_clip_correct_loss_scale6', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     
     return parser.parse_args()

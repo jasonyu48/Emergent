@@ -157,7 +157,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     return distance_reward + same_room_bonus + 30
 
 
-def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_step_norm):
+def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_step_norm, use_quadrant=True):
     """Roll out a single episode using the model with parallel action search"""
     # Reset environment
     obs, info = env.reset()
@@ -243,7 +243,8 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
                 z_next.detach().to(dtype),  # Ensure correct dtype
                 num_samples=num_samples,
                 max_step_norm=max_step_norm,
-                verbose=(step == 0)  # Verbose only on first step
+                verbose=(step == 0),  # Verbose only on first step
+                use_quadrant=use_quadrant  # Use quadrant-based sampling if specified
             )
             
             # Ensure action has the correct dtype
@@ -323,7 +324,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
     }
 
 
-def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=256):
+def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True):
     """Evaluate the trained model on the DotWall environment"""
     # Create output directory
     output_dir = Path(output_dir)
@@ -352,14 +353,15 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
     print(f"Loading model from {model_path}")
     checkpoint = torch.load(model_path, map_location=device)
     
-    # Create model
+    # Create model with specified architecture
+    print(f"Creating model with: encoding_dim={encoding_dim}, hidden_dim={hidden_dim}, encoder_embedding={encoder_embedding}")
     model = PLDMModel(
         img_size=env.img_size,
         in_channels=3,
-        encoding_dim=32,  # Updated to match training default
+        encoding_dim=encoding_dim,
         action_dim=2,
-        hidden_dim=256,    # Updated to match new architecture
-        encoder_embedding=encoder_embedding  # Use encoder_embedding parameter
+        hidden_dim=hidden_dim,
+        encoder_embedding=encoder_embedding
     ).to(device)
     
     # Print model parameter counts
@@ -410,6 +412,7 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
     # Set model to evaluation mode
     model.eval()
     print("Using parallel action search with", num_samples, "samples per step")
+    print(f"Action sampling strategy: {'quadrant-based' if use_quadrant else 'full action space'}")
     
     # Evaluate model for multiple episodes
     success_count = 0
@@ -426,7 +429,8 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
             num_samples=num_samples,
             device=device,
             use_bf16=bf16_supported,
-            max_step_norm=max_step_norm
+            max_step_norm=max_step_norm,
+            use_quadrant=use_quadrant
         )
         
         # Extract data from result
@@ -498,16 +502,26 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
-    parser.add_argument('--model_path', type=str, default='output_v/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='test_output_v', help='Directory to save test results')
+    # Model path and output directory
+    parser.add_argument('--model_path', type=str, default='output_clip_correct_loss_scale5/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='test_output_clip_correct_loss_scale5', help='Directory to save test results')
+    
+    # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to evaluate')
     parser.add_argument('--max_steps', type=int, default=32, help='Maximum steps per episode')
-    parser.add_argument('--num_samples', type=int, default=16, help='Number of action samples to evaluate in parallel')
-    parser.add_argument('--max_step_norm', type=float, default=15, help='Maximum step norm')
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 precision for evaluation')
-    parser.add_argument('--encoder_embedding', type=int, default=128, help='Dimension of encoder embedding')
+    
+    # Action parameters
+    parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
+    parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
+    parser.add_argument('--use_quadrant', type=bool, default=False, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
+    
+    # Model architecture parameters
+    parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
+    parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
+    parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
     
     return parser.parse_args()
 
@@ -522,5 +536,8 @@ if __name__ == '__main__':
         num_samples=args.num_samples,
         use_bf16=args.bf16,
         max_step_norm=args.max_step_norm,
-        encoder_embedding=args.encoder_embedding
+        encoder_embedding=args.encoder_embedding,
+        encoding_dim=args.encoding_dim,
+        hidden_dim=args.hidden_dim,
+        use_quadrant=args.use_quadrant
     ) 
