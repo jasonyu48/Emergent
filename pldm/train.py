@@ -66,20 +66,38 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
 
 
 def compute_returns(rewards, gamma=0.99):
-    """Compute discounted returns"""
-    returns = []
-    R = 0
-    
-    for r in reversed(rewards):
-        R = r + gamma * R
-        returns.insert(0, R)
-    
-    returns = torch.tensor(returns)
-    
-    # # Normalize returns
-    # if len(returns) > 1:
-    #     returns = (returns - returns.mean()) / (returns.std() + 1e-8)
-    
+    """Compute discounted returns efficiently using vectorised tensor ops.
+
+    Args:
+        rewards (Sequence[float] | torch.Tensor): reward at each time-step (length T).
+        gamma (float): discount factor.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape (T,) containing the discounted return *R_t = ∑_{k≥t} γ^{k-t} r_k*.
+        The returned tensor lives on the same *device* and has the same *dtype*
+        as the input (when the input is a tensor); otherwise it defaults to
+        ``torch.float32`` on CPU.
+    """
+    # Convert to tensor while preserving dtype/device when possible
+    if isinstance(rewards, torch.Tensor):
+        r = rewards
+    else:
+        r = torch.as_tensor(rewards, dtype=torch.float32)
+
+    T = r.shape[0]
+    if T == 0:
+        return r.new_empty(0)
+
+    # discounts = [1, γ, γ^2, ... γ^{T-1}]
+    discounts = gamma ** torch.arange(T, dtype=r.dtype, device=r.device)
+    discounted_r = r * discounts  # element-wise
+
+    # Reverse cumulative sum, then flip back and un-discount
+    returns = torch.flip(torch.cumsum(torch.flip(discounted_r, dims=[0]), dim=0), dims=[0])
+    returns = returns / discounts  # undo the earlier scaling
+
     return returns
 
 
@@ -1038,7 +1056,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_clip_correct_loss_scale6', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_clip_correct_loss_scale7', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     
     return parser.parse_args()
