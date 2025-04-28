@@ -521,6 +521,32 @@ def _log_encoder_grad_sources(params, loss_dict, step_idx=0, prefix="EncGradSour
         from tqdm.auto import tqdm as _tqdm
         _tqdm.write(f"[{prefix} step={step_idx}] " + " | ".join(parts))
 
+def save_experiment_info(args, output_dir, epoch, best_reward):
+    """Save experiment parameters and best reward to a text file
+    
+    Args:
+        args: Command line arguments
+        output_dir: Output directory path
+        epoch: Current epoch
+        best_reward: Best reward achieved so far
+    """
+    # Create the filename
+    filename = output_dir / "experiment_info.txt"
+    
+    with open(filename, 'w') as f:
+        # Current time and epoch info
+        f.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Epoch: {epoch+1}\n")
+        f.write(f"Best Avg Reward: {best_reward:.6f}\n\n")
+        
+        # Save all arguments
+        f.write("Command Line Arguments:\n")
+        # Get all arguments as a dictionary
+        arg_dict = vars(args)
+        # Print them sorted by key for consistency
+        for key in sorted(arg_dict.keys()):
+            f.write(f"  --{key}: {arg_dict[key]}\n")
+
 def train_pldm(args):
     """Main training function for PLDM model"""
     # Create output directory
@@ -802,7 +828,7 @@ def train_pldm(args):
                     log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
                     # Value prediction
-                    V_pred = model.next_goal_predictor.value(Z_t.detach())  # detach to avoid encoder grads
+                    V_pred = model.next_goal_predictor.value(Z_t)  # detach to avoid encoder grads
 
                     # Dynamics prediction
                     Z_next_pred = model.dynamics(Z_t.detach(),A_t)
@@ -823,15 +849,15 @@ def train_pldm(args):
                              f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
                         )
 
+                    # Pseudo goal (always compute; used for clip & maybe same-page)
+                    pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
+
                     # Next-state / same-page optional losses
                     next_state_loss = torch.tensor(0.0, device=device)
                     if args.use_same_page_loss:
-                        on_the_same_page_loss = F.mse_loss(NG_store, Z_next_pred)
+                        on_the_same_page_loss = F.mse_loss(pseudo_next_goal, Z_t.detach())
                     else:
                         on_the_same_page_loss = torch.tensor(0.0, device=device)
-
-                    # Pseudo goal for clip penalty (keeps grad to policy net)
-                    pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
 
                     # Clip penalties
                     margin = 4.0
@@ -839,7 +865,7 @@ def train_pldm(args):
                     clip_z_next_pred  = F.relu(Z_next_pred.abs() - margin).mean()
                     clip_pseudo_goal  = F.relu(pseudo_next_goal.abs() - margin).mean()
 
-                    # Aggregate (policy clip scaled separately)
+                    # Clip penalties
                     clip_loss = (
                         clip_z_t +
                         clip_z_next_pred +
@@ -855,7 +881,14 @@ def train_pldm(args):
                     value_loss = F.mse_loss(V_pred, batch_returns_tensor)
 
                     # Total loss
-                    loss = args.lambda_policy * policy_loss + args.lambda_dynamics * dynamics_loss + args.lambda_value * value_loss + args.lambda_clip * clip_loss + next_state_loss + on_the_same_page_loss
+                    loss = (
+                        args.lambda_policy * policy_loss
+                        + args.lambda_dynamics * dynamics_loss
+                        + args.lambda_value * value_loss
+                        + args.lambda_clip * clip_loss
+                        + next_state_loss
+                        + args.lambda_same_page * on_the_same_page_loss
+                    )
 
                 # Log encoder grad sources
                 encoder_params_list = [p for p in model.encoder.parameters() if p.requires_grad]
@@ -878,7 +911,7 @@ def train_pldm(args):
                 if args.use_next_state_loss:
                     loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
                 if args.use_same_page_loss:
-                    loss_contributions['same_page'] = args.lambda_dynamics * on_the_same_page_loss
+                    loss_contributions['same_page'] = args.lambda_same_page * on_the_same_page_loss
 
                 if global_step % args.log_steps == 0:
                     # Encoder gradients
@@ -1001,6 +1034,9 @@ def train_pldm(args):
                 checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
                 
             torch.save(checkpoint_dict, output_dir / 'checkpoint.pt')
+            
+            # Save experiment information to text file
+            save_experiment_info(args, output_dir, epoch, best_reward)
         
         writer.close()
         
@@ -1026,7 +1062,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
-    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+    parser.add_argument('--gamma', type=float, default=0.1, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
@@ -1034,15 +1070,16 @@ def parse_args():
     parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
-    parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
+    parser.add_argument('--use_same_page_loss', type=bool, default=True, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', type=bool, default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
-    parser.add_argument('--lambda_clip', type=float, default=1e-1, help='Weight for clip loss') #was 1e-1. we don't use it now.
-    parser.add_argument('--lambda_policy_clip', type=float, default=1e0, help='Weight for clip loss specifically on policy network') #1e0
+    parser.add_argument('--lambda_clip', type=float, default=0.0, help='Weight for clip loss') #was 1e-1. we don't use it now.
+    parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
+    parser.add_argument('--lambda_same_page', type=float, default=1e-2, help='Weight for on-the-same-page loss')
 
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')
@@ -1056,7 +1093,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_clip_correct_loss_scale7', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value2', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     
     return parser.parse_args()
