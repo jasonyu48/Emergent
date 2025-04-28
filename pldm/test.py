@@ -154,7 +154,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     distance_reward = -distance  # Negative distance as reward
     same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
-    return distance_reward + same_room_bonus + 30
+    return distance_reward + same_room_bonus + 64
 
 
 def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_step_norm, use_quadrant=True):
@@ -503,8 +503,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
     # Model path and output directory
-    parser.add_argument('--model_path', type=str, default='output_same_page_value/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='test_output_same_page_value', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_same_page_value6/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value6', help='Directory to save test results')
     
     # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 

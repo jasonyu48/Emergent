@@ -855,7 +855,7 @@ def train_pldm(args):
                     # Next-state / same-page optional losses
                     next_state_loss = torch.tensor(0.0, device=device)
                     if args.use_same_page_loss:
-                        on_the_same_page_loss = F.mse_loss(pseudo_next_goal, Z_t.detach())
+                        on_the_same_page_loss = F.relu(F.mse_loss(pseudo_next_goal, Z_t.detach()) - 0.2)
                     else:
                         on_the_same_page_loss = torch.tensor(0.0, device=device)
 
@@ -1079,7 +1079,7 @@ def parse_args():
     parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
     parser.add_argument('--lambda_clip', type=float, default=0.0, help='Weight for clip loss') #was 1e-1. we don't use it now.
     parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
-    parser.add_argument('--lambda_same_page', type=float, default=1e-2, help='Weight for on-the-same-page loss')
+    parser.add_argument('--lambda_same_page', type=float, default=1, help='Weight for on-the-same-page loss')
 
     parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')
@@ -1093,7 +1093,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value2', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value7', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     
     return parser.parse_args()
