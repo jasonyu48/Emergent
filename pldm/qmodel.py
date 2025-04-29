@@ -202,9 +202,7 @@ class DynamicsModel(nn.Module):
 class NextGoalPredictor(nn.Module):
     """MLP that predicts next goal state given current encoded state"""
     
-    def __init__(self, encoding_dim=NUM_CODES, hidden_dim=512, num_layers=6, temperature: float = 1.0):
-        # Temperature for categorical distribution
-        self.temperature = temperature
+    def __init__(self, encoding_dim=NUM_CODES, hidden_dim=512, num_layers=6):
         super().__init__()
         
         self.encoding_dim = encoding_dim
@@ -284,7 +282,7 @@ class NextGoalPredictor(nn.Module):
     def _get_distribution(self, z_t):
         """Return Normal distribution N(mean(z_t), 1)."""
         logits = self.output_proj(self._compute_features(z_t))
-        return Categorical(logits=logits / self.temperature)
+        return Categorical(logits=logits)
     
     # ------------------------------------------------------------------
     #  Value prediction
@@ -377,8 +375,7 @@ class PLDMModel(nn.Module):
         
         self.next_goal_predictor = NextGoalPredictor(
             encoding_dim=encoding_dim,
-            hidden_dim=hidden_dim,
-            temperature=temperature
+            hidden_dim=hidden_dim
         )
         
         # Decoder only used during warm-up epochs to prevent encoder collapse
