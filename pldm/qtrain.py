@@ -62,7 +62,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     distance_reward = -distance  # Negative distance as reward
     same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
-    return distance_reward + same_room_bonus
+    return distance_reward + same_room_bonus + 64
 
 
 def compute_returns(rewards, gamma=0.99):
@@ -598,8 +598,7 @@ def train_pldm(args):
         encoding_dim=args.encoding_dim,
         action_dim=2,  # DotWall has 2D actions
         hidden_dim=args.hidden_dim,
-        encoder_embedding=args.encoder_embedding,
-        temperature=args.temperature
+        encoder_embedding=args.encoder_embedding
     ).to(device)
     
     # Print model parameter counts
@@ -829,7 +828,7 @@ def train_pldm(args):
                     log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
                     # Value prediction
-                    V_pred = model.next_goal_predictor.value(Z_t.detach())
+                    V_pred = model.next_goal_predictor.value(Z_t)
 
                     # Dynamics prediction
                     Z_next_pred = model.dynamics(Z_t.detach(),A_t)
@@ -1026,7 +1025,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state (default 512 for discrete codes)')
+    parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
     
@@ -1055,11 +1054,11 @@ def parse_args():
     parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-2, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-2, help='Learning rate for dynamics model')
+    parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=0.9, help='Learning rate for dynamics model')
     parser.add_argument('--policy_lr', type=float, default=1e-2, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-1, help='Learning rate for value')
-    parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
+    parser.add_argument('--value_lr', type=float, default=5e-3, help='Learning rate for value')
+    parser.add_argument('--decoder_lr', type=float, default=5e-4, help='Learning rate for decoder')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
@@ -1069,7 +1068,6 @@ def parse_args():
                         help='Device to run training on')
     parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     
     return parser.parse_args()
 
