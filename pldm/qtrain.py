@@ -1069,7 +1069,7 @@ def parse_args():
                         help='Device to run training on')
     parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
-    parser.add_argument('--temperature', type=float, default=0.9, help='Temperature for discrete softmax')
+    parser.add_argument('--temperature', type=float, default=0.8, help='Temperature for discrete softmax')
     
     return parser.parse_args()
 

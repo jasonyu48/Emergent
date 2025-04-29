@@ -523,7 +523,7 @@ def parse_args():
     parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
-    parser.add_argument('--temperature', type=float, default=0.001, help='Temperature for discrete softmax')
+    parser.add_argument('--temperature', type=float, default=0.9, help='Temperature for discrete softmax')
     
     return parser.parse_args()
 
