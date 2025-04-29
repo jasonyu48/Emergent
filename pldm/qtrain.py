@@ -143,9 +143,10 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
     with torch.no_grad():
         # Convert observation to tensor properly
         if isinstance(obs, torch.Tensor):
-            obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+            obs_tensor = obs.to(dtype=dtype, device=device)
         else:
-            obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+            obs_tensor = torch.tensor(obs, dtype=dtype, device=device)
+        obs_tensor = obs_tensor.unsqueeze(0)
         
         # Encode current observation
         try:
@@ -179,7 +180,7 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
                 z_t = z_t.to(dtype)
                 
             z_next, log_prob = model.predict_next_goal(z_t)
-            next_goals.append(z_next.cpu())
+            next_goals.append(z_next.squeeze(0).cpu())
             log_probs.append(log_prob.item())
         
         # Action search needs z_t and z_next to be detached
@@ -221,9 +222,10 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
         with torch.no_grad():
             # Convert observation to tensor
             if isinstance(obs, torch.Tensor):
-                obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+                obs_tensor = obs.to(dtype=dtype, device=device)
             else:
-                obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+                obs_tensor = torch.tensor(obs, dtype=dtype, device=device)
+            obs_tensor = obs_tensor.unsqueeze(0)
             
             # Encode next observation
             z_t = model.encode(obs_tensor)
@@ -477,8 +479,7 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
         parts.append(f"{k}: Δw/|w|={acc[k]['sum']/acc[k]['n']:.2e}")
 
     if parts:
-        from tqdm.auto import tqdm as _tqdm
-        _tqdm.write(f"[GradStats step={step_idx}] " + " | ".join(parts))
+        tqdm.write(f"[GradStats step={step_idx}] " + " | ".join(parts))
 
 # -----------------------------------------------------------------------------
 # Utility: log gradient contributions to encoder from individual loss terms
@@ -518,8 +519,7 @@ def _log_encoder_grad_sources(params, loss_dict, step_idx=0, prefix="EncGradSour
 
     if stats:
         parts = [f"{k}: |g|={v:.2e}" for k, v in stats.items()]
-        from tqdm.auto import tqdm as _tqdm
-        _tqdm.write(f"[{prefix} step={step_idx}] " + " | ".join(parts))
+        tqdm.write(f"[{prefix} step={step_idx}] " + " | ".join(parts))
 
 def save_experiment_info(args, output_dir, epoch, best_reward):
     """Save experiment parameters and best reward to a text file
@@ -823,6 +823,11 @@ def train_pldm(args):
 
                     # Encode in one shot
                     Z_t = model.encode(S_t)
+
+                    if global_step % args.log_steps == 0:
+                        tqdm.write(f"next_goal: {NG_store.argmax(dim=-1)}")
+                        tqdm.write(f"codes: {Z_t.argmax(dim=-1)}")
+
                     Z_next_actual = model.encode(S_next)
 
                     # Policy log-prob (no grad through stored goal)
@@ -847,8 +852,7 @@ def train_pldm(args):
                     avg_mag_ng_store    = NG_store.norm(dim=-1).mean().item()
 
                     if global_step % args.log_steps == 0:
-                        from tqdm.auto import tqdm as _tqdm
-                        _tqdm.write(
+                        tqdm.write(
                              f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
                         )
 
@@ -857,7 +861,7 @@ def train_pldm(args):
                         ng_codes = NG_store.argmax(dim=1)
                         num_z_codes = int(torch.unique(z_codes).numel())
                         num_ng_codes = int(torch.unique(ng_codes).numel())
-                        _tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
+                        tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
 
                     # Next-state / same-page optional losses
                     next_state_loss = torch.tensor(0.0, device=device)
@@ -1040,7 +1044,7 @@ def parse_args():
     parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=32, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=1, help='Logging frequency for gradient statistics')
     parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
@@ -1055,9 +1059,9 @@ def parse_args():
     parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-2, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-2, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-2, help='Learning rate for policy')
+    parser.add_argument('--encoder_lr', type=float, default=1e-1, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=1e-1, help='Learning rate for policy')
     parser.add_argument('--value_lr', type=float, default=1e-1, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
@@ -1069,7 +1073,7 @@ def parse_args():
                         help='Device to run training on')
     parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
-    parser.add_argument('--temperature', type=float, default=0.8, help='Temperature for discrete softmax')
+    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     
     return parser.parse_args()
 

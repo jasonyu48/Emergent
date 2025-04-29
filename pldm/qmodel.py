@@ -67,14 +67,14 @@ class ViTEncoder(nn.Module):
             # Use Kaiming initialization for linear layers
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             if m.bias is not None:
-                nn.init.zeros_(m.bias)
+                nn.init.normal_(m.bias, mean=0.0, std=1e-3)  # small random bias
         elif isinstance(m, nn.Conv2d):
             # Use Kaiming initialization for convolutional layers
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             if m.bias is not None:
-                nn.init.zeros_(m.bias)
+                nn.init.normal_(m.bias, mean=0.0, std=1e-3)  # small random bias
         elif isinstance(m, nn.LayerNorm):
-            # Initialize LayerNorm as before
+            # Keep LayerNorm bias at zero; weight at one (unchanged)
             nn.init.zeros_(m.bias)
             nn.init.ones_(m.weight)
         # Special initialization for ViT specific parameters
@@ -155,7 +155,7 @@ class DynamicsModel(nn.Module):
         if isinstance(m, nn.Linear):
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             if m.bias is not None:
-                nn.init.zeros_(m.bias)
+                nn.init.normal_(m.bias, mean=0.0, std=1e-3)  # small random bias
         elif isinstance(m, nn.LayerNorm):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
@@ -251,7 +251,7 @@ class NextGoalPredictor(nn.Module):
         if isinstance(m, nn.Linear):
             nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             if m.bias is not None:
-                nn.init.zeros_(m.bias)
+                nn.init.normal_(m.bias, mean=0.0, std=1e-3)  # small random bias
         elif isinstance(m, nn.LayerNorm):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)

@@ -66,7 +66,10 @@ class DotWall(gym.Env):
         return self.rng
 
     def render(self):
-        return self._get_obs()
+        obs = self._get_obs()
+        if obs.max() > 1.0:
+            obs = obs / 255.0
+        return obs
 
     def reset(self, location=None) -> Tuple[ObsType, InfoType]:
         self.wall_x, self.hole_y = self._generate_wall()
@@ -82,6 +85,8 @@ class DotWall(gym.Env):
         self.position_history = [self.dot_position]
         obs = self._render_dot_and_wall()
         info = self._build_info()
+        if obs.max() > 1.0:
+            obs = obs / 255.0
         return obs, info
 
     def _build_info(self) -> InfoType:
@@ -104,6 +109,8 @@ class DotWall(gym.Env):
         obs = self._render_dot_and_wall()
         done = (self.dot_position - self.target_position).pow(2).mean() < 1.0
         truncated = len(self.position_history) >= self.n_steps
+        if obs.max() > 1.0:
+            obs = obs / 255.0
         return obs, 0.0, done, truncated, self._build_info()
 
     def _calculate_next_position(self, action):
@@ -288,4 +295,6 @@ class DotWall(gym.Env):
         dot_img = self._render_dot(location)
         target_img = self._render_dot(self.target_position)
         obs_output = torch.stack([dot_img, self.wall_img, target_img], dim=0)
+        if obs_output.max() > 1.0:
+            obs_output = obs_output / 255.0
         return obs_output
