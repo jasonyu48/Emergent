@@ -39,7 +39,7 @@ from pldm.data.utils import get_optional_fields
 import pldm.utils as utils
 
 from pldm_envs.wall.wall import DotWall
-from pldm.model import PLDMModel
+from pldm.qmodel import PLDMModel
 
 
 def calculate_distance_reward(dot_position, target_position, wall_x, wall_width):
@@ -62,7 +62,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     distance_reward = -distance  # Negative distance as reward
     same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
-    return distance_reward + same_room_bonus + 64
+    return distance_reward + same_room_bonus
 
 
 def compute_returns(rewards, gamma=0.99):
@@ -598,7 +598,8 @@ def train_pldm(args):
         encoding_dim=args.encoding_dim,
         action_dim=2,  # DotWall has 2D actions
         hidden_dim=args.hidden_dim,
-        encoder_embedding=args.encoder_embedding
+        encoder_embedding=args.encoder_embedding,
+        temperature=args.temperature
     ).to(device)
     
     # Print model parameter counts
@@ -828,13 +829,15 @@ def train_pldm(args):
                     log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
                     # Value prediction
-                    V_pred = model.next_goal_predictor.value(Z_t)
+                    V_pred = model.next_goal_predictor.value(Z_t.detach())
 
                     # Dynamics prediction
                     Z_next_pred = model.dynamics(Z_t.detach(),A_t)
 
                     # ---------------- losses ----------------
-                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
+                    # KL divergence between predicted and target probability distributions
+                    eps = 1e-10
+                    dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual.detach(), reduction='batchmean')
 
                     # ------------------------------------------------------------------
                     #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
@@ -849,28 +852,21 @@ def train_pldm(args):
                              f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
                         )
 
-                    # Pseudo goal (always compute; used for clip & maybe same-page)
-                    pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
+                        # Count distinct discrete codes in this batch
+                        z_codes = Z_t.argmax(dim=1)
+                        ng_codes = NG_store.argmax(dim=1)
+                        num_z_codes = int(torch.unique(z_codes).numel())
+                        num_ng_codes = int(torch.unique(ng_codes).numel())
+                        _tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
 
                     # Next-state / same-page optional losses
                     next_state_loss = torch.tensor(0.0, device=device)
                     if args.use_same_page_loss:
-                        on_the_same_page_loss = F.relu(F.mse_loss(pseudo_next_goal, Z_t.detach()) - 0.2)
+                        # Use KL divergence between policy-proposed goal and encoder latent distribution
+                        pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
+                        on_the_same_page_loss = F.kl_div((pseudo_next_goal + eps).log(), Z_t.detach(), reduction='batchmean')
                     else:
                         on_the_same_page_loss = torch.tensor(0.0, device=device)
-
-                    # Clip penalties
-                    margin = 4.0
-                    clip_z_t          = F.relu(Z_t.abs() - margin).mean()
-                    clip_z_next_pred  = F.relu(Z_next_pred.abs() - margin).mean()
-                    clip_pseudo_goal  = F.relu(pseudo_next_goal.abs() - margin).mean()
-
-                    # Clip penalties
-                    clip_loss = (
-                        clip_z_t +
-                        clip_z_next_pred +
-                        clip_pseudo_goal * args.lambda_policy_clip
-                    )
 
                     # Advantage / policy loss
                     advantage = batch_returns_tensor - V_pred  # V_pred detached above
@@ -885,7 +881,6 @@ def train_pldm(args):
                         args.lambda_policy * policy_loss
                         + args.lambda_dynamics * dynamics_loss
                         + args.lambda_value * value_loss
-                        + args.lambda_clip * clip_loss
                         + next_state_loss
                         + args.lambda_same_page * on_the_same_page_loss
                     )
@@ -902,11 +897,8 @@ def train_pldm(args):
                 else:
                     loss_contributions['value'] = None
 
-                # Clip contribution (optional)
-                if args.lambda_clip > 0:
-                    loss_contributions['clip'] = args.lambda_clip * clip_loss
-                else:
-                    loss_contributions['clip'] = None
+                # No clip contribution in discrete setting
+                loss_contributions['clip'] = None
 
                 if args.use_next_state_loss:
                     loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
@@ -946,12 +938,6 @@ def train_pldm(args):
                     writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
                 if args.use_value_loss:
                     writer.add_scalar('Loss/value', value_loss.item(), global_step)
-                if args.lambda_clip >= 0:
-                    writer.add_scalar('Loss/clip', clip_loss.item(), global_step)
-                    # Per-component clip losses
-                    writer.add_scalar('Clip/z_t', clip_z_t.item(), global_step)
-                    writer.add_scalar('Clip/z_next_pred', clip_z_next_pred.item(), global_step)
-                    writer.add_scalar('Clip/pseudo_goal', clip_pseudo_goal.item(), global_step)
                 writer.add_scalar('Reward/individual_episode', batch_returns[0], global_step)
                 writer.add_scalar('Stats/mag_z_t', avg_mag_z_t, global_step)
                 writer.add_scalar('Stats/mag_z_next_pred', avg_mag_z_next_pred, global_step)
@@ -966,11 +952,6 @@ def train_pldm(args):
                     total_on_the_same_page_loss += on_the_same_page_loss.item()
                 if args.use_value_loss:
                     total_value_loss += value_loss.item()
-                if args.lambda_clip >= 0:
-                    total_clip_loss += clip_loss.item()
-                    total_clip_z_t += clip_z_t.item()
-                    total_clip_z_next_pred += clip_z_next_pred.item()
-                    total_clip_pseudo_goal += clip_pseudo_goal.item()
 
                 # ----------------------------------------------------------------
                 global_step += 1
@@ -1003,13 +984,6 @@ def train_pldm(args):
                 if args.use_value_loss:
                     avg_value_loss = total_value_loss / num_episodes
                     report += f", Avg Value Loss: {avg_value_loss:.4f}"
-                
-                if args.lambda_clip >= 0:
-                    avg_clip_loss = total_clip_loss / args.updates_per_epoch
-                    avg_clip_z_t = total_clip_z_t / args.updates_per_epoch
-                    avg_clip_z_next = total_clip_z_next_pred / args.updates_per_epoch
-                    avg_clip_pseudo = total_clip_pseudo_goal / args.updates_per_epoch
-                    report += f", Avg Clip Loss: {avg_clip_loss:.4f} (z_t={avg_clip_z_t:.4f}, z_next={avg_clip_z_next:.4f}, pseudo={avg_clip_pseudo:.4f})"
                 
                 print(report)
                 
@@ -1052,7 +1026,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=32, help='Dimension of encoded state')
+    parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state (default 512 for discrete codes)')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
     
@@ -1070,7 +1044,7 @@ def parse_args():
     parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
-    parser.add_argument('--use_same_page_loss', type=bool, default=True, help='Use on-the-same-page loss between next goal and dynamics')
+    parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', type=bool, default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
     
@@ -1079,13 +1053,13 @@ def parse_args():
     parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
     parser.add_argument('--lambda_clip', type=float, default=0.0, help='Weight for clip loss') #was 1e-1. we don't use it now.
     parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
-    parser.add_argument('--lambda_same_page', type=float, default=1, help='Weight for on-the-same-page loss')
+    parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-4, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')
+    parser.add_argument('--encoder_lr', type=float, default=1e-2, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-2, help='Learning rate for dynamics model')
     parser.add_argument('--policy_lr', type=float, default=1e-2, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=5e-3, help='Learning rate for value')
-    parser.add_argument('--decoder_lr', type=float, default=5e-4, help='Learning rate for decoder')
+    parser.add_argument('--value_lr', type=float, default=1e-1, help='Learning rate for value')
+    parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
     # Precision parameters
     parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
@@ -1095,6 +1069,7 @@ def parse_args():
                         help='Device to run training on')
     parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
+    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     
     return parser.parse_args()
 
