@@ -134,7 +134,7 @@ def visualize_trajectory(frames, recon_frames, dot_positions, target_position, w
     make_gif(plt_frames, output_path, fps=2)
 
 
-def calculate_distance_reward(dot_position, target_position, wall_x, wall_width):
+def calculate_distance_reward(dot_position, target_position, wall_x, wall_width, base_reward):
     """Calculate reward based on distance and whether dot and target are in same room"""
     
     # Calculate Euclidean distance
@@ -154,10 +154,10 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     distance_reward = -distance  # Negative distance as reward
     same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
-    return distance_reward + same_room_bonus + 64
+    return distance_reward + same_room_bonus + base_reward
 
 
-def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_step_norm, use_quadrant=True):
+def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_step_norm, use_quadrant=True, base_reward=64.0):
     """Roll out a single episode using the model with parallel action search"""
     # Reset environment
     obs, info = env.reset()
@@ -267,7 +267,8 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
             dot_position, 
             target_position, 
             env.wall_x, 
-            env.wall_width
+            env.wall_width,
+            base_reward
         ).item()
         
         # Update episode reward with custom reward
@@ -324,7 +325,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
     }
 
 
-def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True, temperature=1.0):
+def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True, temperature=1.0, encoder_type='cnn', next_goal_temp=None, base_reward=64.0):
     """Evaluate the trained model on the DotWall environment"""
     # Create output directory
     output_dir = Path(output_dir)
@@ -362,7 +363,9 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         action_dim=2,
         hidden_dim=hidden_dim,
         encoder_embedding=encoder_embedding,
-        temperature=temperature
+        encoder_type=encoder_type,
+        temperature=temperature,
+        next_goal_temp=next_goal_temp
     ).to(device)
     
     # Print model parameter counts
@@ -431,7 +434,8 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
             device=device,
             use_bf16=bf16_supported,
             max_step_norm=max_step_norm,
-            use_quadrant=use_quadrant
+            use_quadrant=use_quadrant,
+            base_reward=base_reward
         )
         
         # Extract data from result
@@ -524,6 +528,9 @@ def parse_args():
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
     parser.add_argument('--temperature', type=float, default=0.9, help='Temperature for discrete softmax')
+    parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
+    parser.add_argument('--next_goal_temp', type=float, default=10.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
+    parser.add_argument('--base_reward', type=float, default=64.0, help='Base reward for each step')
     
     return parser.parse_args()
 
@@ -542,5 +549,8 @@ if __name__ == '__main__':
         encoding_dim=args.encoding_dim,
         hidden_dim=args.hidden_dim,
         use_quadrant=args.use_quadrant,
-        temperature=args.temperature
+        temperature=args.temperature,
+        encoder_type=args.encoder_type,
+        next_goal_temp=args.next_goal_temp,
+        base_reward=args.base_reward
     ) 
