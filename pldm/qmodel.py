@@ -113,6 +113,31 @@ class ViTEncoder(nn.Module):
         probs  = F.softmax(logits / self.temperature, dim=-1)
         return probs
 
+# Add a CNN-based encoder alternative
+class CNNEncoder(nn.Module):
+    """Convolutional encoder to optionally replace the ViT encoder."""
+    def __init__(self, img_size, in_channels, encoding_dim, embedding_dim, temperature: float = 1.0):
+        super().__init__()
+        self.temperature = temperature
+        # Three conv layers downsampling by factor 2 each
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+        )
+        # Flatten and project to embedding_dim
+        final_feat = (img_size // 8) ** 2 * 32
+        self.projection = nn.Linear(final_feat, encoding_dim)
+
+    def forward(self, x):
+        B = x.size(0)
+        out = self.conv(x)
+        out = out.view(B, -1)
+        logits = self.projection(out)
+        return F.softmax(logits / self.temperature, dim=-1)
 
 class DynamicsModel(nn.Module):
     """MLP Dynamics Model that predicts next encoded state given current encoded state and action"""
@@ -202,12 +227,13 @@ class DynamicsModel(nn.Module):
 class NextGoalPredictor(nn.Module):
     """MLP that predicts next goal state given current encoded state"""
     
-    def __init__(self, encoding_dim=NUM_CODES, hidden_dim=512, num_layers=6):
+    def __init__(self, encoding_dim=NUM_CODES, hidden_dim=512, num_layers=6, temperature: float = 1.0):
         super().__init__()
         
         self.encoding_dim = encoding_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.temperature = temperature
         
         # Input projection layer
         self.input_proj = nn.Linear(encoding_dim, hidden_dim)
@@ -259,7 +285,7 @@ class NextGoalPredictor(nn.Module):
     def forward(self, z_t):
         x = self._compute_features(z_t)
         logits = self.output_proj(x)              # [B, 512]
-        dist = Categorical(logits=logits)
+        dist = Categorical(logits=logits / self.temperature)
         idx  = dist.sample()                      # [B]
         z_next = F.one_hot(idx, num_classes=NUM_CODES).float()
         log_prob = dist.log_prob(idx)             # [B]
@@ -282,7 +308,7 @@ class NextGoalPredictor(nn.Module):
     def _get_distribution(self, z_t):
         """Return Normal distribution N(mean(z_t), 1)."""
         logits = self.output_proj(self._compute_features(z_t))
-        return Categorical(logits=logits)
+        return Categorical(logits=logits / self.temperature)
     
     # ------------------------------------------------------------------
     #  Value prediction
@@ -351,20 +377,34 @@ class PLDMModel(nn.Module):
         action_dim=2,
         hidden_dim=512,
         encoder_embedding=256,
-        temperature: float = 1.0
+        encoder_type: str = "vit",
+        temperature: float = 1.0,
+        next_goal_temp: float = None
     ):
         # Temperature shared across submodules
         self.temperature = temperature
         super().__init__()
         
-        # Create components
-        self.encoder = ViTEncoder(
-            img_size=img_size,
-            in_channels=in_channels,
-            embedding_dim=encoder_embedding,
-            encoding_dim=encoding_dim,
-            temperature=temperature
-        )
+        # Separate temperature for next-goal predictor
+        self.next_goal_temp = next_goal_temp if next_goal_temp is not None else temperature
+        
+        # Create encoder based on user choice
+        if encoder_type.lower() == "cnn":
+            self.encoder = CNNEncoder(
+                img_size=img_size,
+                in_channels=in_channels,
+                encoding_dim=encoding_dim,
+                embedding_dim=encoder_embedding,
+                temperature=temperature
+            )
+        else:
+            self.encoder = ViTEncoder(
+                img_size=img_size,
+                in_channels=in_channels,
+                embedding_dim=encoder_embedding,
+                encoding_dim=encoding_dim,
+                temperature=temperature
+            )
         
         self.dynamics = DynamicsModel(
             encoding_dim=encoding_dim,
@@ -375,7 +415,8 @@ class PLDMModel(nn.Module):
         
         self.next_goal_predictor = NextGoalPredictor(
             encoding_dim=encoding_dim,
-            hidden_dim=hidden_dim
+            hidden_dim=hidden_dim,
+            temperature=self.next_goal_temp
         )
         
         # Decoder only used during warm-up epochs to prevent encoder collapse

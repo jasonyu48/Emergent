@@ -62,7 +62,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width)
     distance_reward = -distance  # Negative distance as reward
     same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
-    return distance_reward + same_room_bonus
+    return distance_reward + same_room_bonus + args.base_reward
 
 
 def compute_returns(rewards, gamma=0.99):
@@ -599,7 +599,9 @@ def train_pldm(args):
         action_dim=2,  # DotWall has 2D actions
         hidden_dim=args.hidden_dim,
         encoder_embedding=args.encoder_embedding,
-        temperature=args.temperature
+        encoder_type=args.encoder_type,
+        temperature=args.temperature,
+        next_goal_temp=args.next_goal_temp
     ).to(device)
     
     # Print model parameter counts
@@ -824,9 +826,12 @@ def train_pldm(args):
                     # Encode in one shot
                     Z_t = model.encode(S_t)
 
-                    if global_step % args.log_steps == 0:
-                        tqdm.write(f"next_goal: {NG_store.argmax(dim=-1)}")
-                        tqdm.write(f"codes: {Z_t.argmax(dim=-1)}")
+                    if global_step % args.log_steps == 0 and args.heatmap:
+                        # save a heatmap of Z_t, make the heat map larger
+                        plt.figure(figsize=(10, 10))
+                        plt.imshow(Z_t.cpu().detach().numpy())
+                        plt.savefig(f"{args.output_dir}/heatmap_{global_step}.png")
+                        plt.close()
 
                     Z_next_actual = model.encode(S_next)
 
@@ -1033,18 +1038,20 @@ def parse_args():
     parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state (default 512 for discrete codes)')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
+    parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
-    parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
+    parser.add_argument('--updates_per_epoch', type=int, default=64, help='Number of training updates (batches of transitions) per epoch')
+    parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.1, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=1, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=4, help='Logging frequency for gradient statistics')
+    parser.add_argument('--heatmap', type=bool, default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
     parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
@@ -1073,8 +1080,9 @@ def parse_args():
                         help='Device to run training on')
     parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
-    
+    parser.add_argument('--temperature', type=float, default=0.9, help='Temperature for discrete softmax')
+    parser.add_argument('--next_goal_temp', type=float, default=10, help='Temperature for next-goal predictor; if not set, uses --temperature')
+    parser.add_argument('--base_reward', type=float, default=64, help='Base reward for each step')
     return parser.parse_args()
 
 
