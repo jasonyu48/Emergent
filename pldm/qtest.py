@@ -325,7 +325,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
     }
 
 
-def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True, temperature=1.0, encoder_type='cnn', next_goal_temp=None, base_reward=64.0):
+def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True, temperature=1.0, encoder_type='cnn', next_goal_temp=None, base_reward=64.0, search_mode='pldm'):
     """Evaluate the trained model on the DotWall environment"""
     # Create output directory
     output_dir = Path(output_dir)
@@ -365,7 +365,9 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         encoder_embedding=encoder_embedding,
         encoder_type=encoder_type,
         temperature=temperature,
-        next_goal_temp=next_goal_temp
+        next_goal_temp=next_goal_temp,
+        search_mode=search_mode,
+        max_step_norm=max_step_norm
     ).to(device)
     
     # Print model parameter counts
@@ -531,6 +533,7 @@ def parse_args():
     parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     parser.add_argument('--next_goal_temp', type=float, default=10.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
     parser.add_argument('--base_reward', type=float, default=64.0, help='Base reward for each step')
+    parser.add_argument('--search_mode', type=str, default='pldm', choices=['pldm','rl'], help='Action search mode: pldm or rl')
     
     return parser.parse_args()
 
@@ -552,5 +555,6 @@ if __name__ == '__main__':
         temperature=args.temperature,
         encoder_type=args.encoder_type,
         next_goal_temp=args.next_goal_temp,
-        base_reward=args.base_reward
+        base_reward=args.base_reward,
+        search_mode=args.search_mode
     ) 

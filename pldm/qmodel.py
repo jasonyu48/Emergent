@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal, Categorical
 from pathlib import Path
+import math
 
 NUM_CODES = 512  # size of the discrete latent vocabulary
 
@@ -379,7 +380,9 @@ class PLDMModel(nn.Module):
         encoder_embedding=256,
         encoder_type: str = "vit",
         temperature: float = 1.0,
-        next_goal_temp: float = None
+        next_goal_temp: float = None,
+        search_mode: str = 'pldm',
+        max_step_norm: float = 15.0
     ):
         # Temperature shared across submodules
         self.temperature = temperature
@@ -387,6 +390,21 @@ class PLDMModel(nn.Module):
         
         # Separate temperature for next-goal predictor
         self.next_goal_temp = next_goal_temp if next_goal_temp is not None else temperature
+        # Mode for action search: 'pldm' or 'rl'
+        self.search_mode = search_mode.lower()
+        # Store max step norm for RL grid
+        self.max_step_norm = max_step_norm
+        # Precompute RL grid actions once
+        if self.search_mode == 'rl':
+            # build a sqrt(n) x sqrt(n) grid spanning [-max_step_norm, max_step_norm]
+            n = encoding_dim
+            grid_size = int(math.ceil(math.sqrt(n)))
+            coords = torch.linspace(-self.max_step_norm, self.max_step_norm, steps=grid_size)
+            xg, yg = torch.meshgrid(coords, coords, indexing='xy')
+            flat = torch.stack([xg.flatten(), yg.flatten()], dim=1)  # [grid_size^2,2]
+            self.register_buffer('rl_actions', flat[:n])
+        else:
+            self.rl_actions = None
         
         # Create encoder based on user choice
         if encoder_type.lower() == "cnn":
@@ -444,17 +462,15 @@ class PLDMModel(nn.Module):
         return self.dynamics(z_t, a_t)
     
     def search_action(self, z_t, z_target, verbose=False, max_step_norm=15, num_samples=100, use_quadrant=True):
-        """Search for the action that leads from z_t to z_target using parallel sampling
-        
-        Args:
-            z_t: Current encoded state
-            z_target: Target encoded state
-            verbose: Whether to print debug information
-            max_step_norm: Maximum step norm for sampled actions
-            num_samples: Number of action samples to evaluate
-            use_quadrant: If True, sample actions from a single random quadrant.
-                          If False, sample from the full action space.
-        """
+        """Search for the action that leads from z_t to z_target, optionally using RL mode which directly maps the one-hot code to a grid action."""
+        # Determine action selection mode
+        mode = getattr(self, 'search_mode', 'pldm')
+        # RL mode: treat each code index in z_target as a direct action selection
+        if mode.lower() == 'rl':
+            # z_target is one-hot [B, encoding_dim]
+            idxs = z_target.argmax(dim=1)  # [B]
+            return self.rl_actions[idxs]
+        # default PLDM search follows below
         # Keep track of device and dtype
         dtype = z_t.dtype
         device = z_t.device
