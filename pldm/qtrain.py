@@ -498,14 +498,14 @@ def _log_encoder_grad_sources(params, loss_dict, step_idx=0, prefix="EncGradSour
     for name, loss in loss_dict.items():
         if loss is None:
             continue
-        # Compute grads w.r.t encoder params WITHOUT accumulating into .grad
+        # Compute grads w.r.t params WITHOUT accumulating into .grad
         grads = torch.autograd.grad(
             loss,
             params,
             retain_graph=True,
             allow_unused=True,
         )
-        # Compute mean absolute gradient across all encoder params
+        # Compute mean absolute gradient across all params
         abs_means = []
         for g in grads:
             if g is None:
@@ -723,15 +723,8 @@ def train_pldm(args):
             total_reward = 0
             total_policy_loss = 0
             total_dynamics_loss = 0
-            total_next_state_loss = 0
             total_on_the_same_page_loss = 0
-            total_reconstruction_loss = 0
-            total_variance_loss = 0
             total_value_loss = 0
-            total_clip_loss = 0
-            total_clip_z_t = 0
-            total_clip_z_next_pred = 0
-            total_clip_pseudo_goal = 0
             num_episodes = 0
 
             # Adjust learning rates for this epoch
@@ -870,8 +863,6 @@ def train_pldm(args):
                         num_ng_codes = int(torch.unique(ng_codes).numel())
                         tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
 
-                    # Next-state / same-page optional losses
-                    next_state_loss = torch.tensor(0.0, device=device)
                     if args.use_same_page_loss:
                         # Use KL divergence between policy-proposed goal and encoder latent distribution
                         pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
@@ -887,13 +878,17 @@ def train_pldm(args):
                     # Value loss
                     value_loss = F.mse_loss(V_pred, batch_returns_tensor)
 
-                    # Total loss
+                    # Entropy bonus for exploration
+                    dist_ent = model.next_goal_predictor._get_distribution(Z_t)
+                    entropy = dist_ent.entropy().mean()
+                    writer.add_scalar('Stats/entropy', entropy.item(), global_step)
+                    # Total loss including entropy bonus
                     loss = (
                         args.lambda_policy * policy_loss
                         + args.lambda_dynamics * dynamics_loss
                         + args.lambda_value * value_loss
-                        + next_state_loss
                         + args.lambda_same_page * on_the_same_page_loss
+                        - args.lambda_entropy * entropy
                     )
 
                 # Log encoder grad sources
@@ -901,18 +896,11 @@ def train_pldm(args):
                 loss_contributions = {
                     'policy': args.lambda_policy * policy_loss,
                     'dynamics': args.lambda_dynamics * dynamics_loss,
+                    'entropy': - args.lambda_entropy * entropy,
                 }
                 # Value loss contribution (optional)
                 if args.use_value_loss and args.lambda_value > 0:
                     loss_contributions['value'] = args.lambda_value * value_loss
-                else:
-                    loss_contributions['value'] = None
-
-                # No clip contribution in discrete setting
-                loss_contributions['clip'] = None
-
-                if args.use_next_state_loss:
-                    loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
                 if args.use_same_page_loss:
                     loss_contributions['same_page'] = args.lambda_same_page * on_the_same_page_loss
 
@@ -943,8 +931,6 @@ def train_pldm(args):
                 # Logging
                 writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
                 writer.add_scalar('Loss/dynamics', dynamics_loss.item(), global_step)
-                if args.use_next_state_loss:
-                    writer.add_scalar('Loss/next_state', next_state_loss.item(), global_step)
                 if args.use_same_page_loss:
                     writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
                 if args.use_value_loss:
@@ -957,8 +943,6 @@ def train_pldm(args):
                 # ---------------- aggregate epoch-level stats -----------------
                 total_policy_loss += policy_loss.item()
                 total_dynamics_loss += dynamics_loss.item()
-                if args.use_next_state_loss:
-                    total_next_state_loss += next_state_loss.item()
                 if args.use_same_page_loss:
                     total_on_the_same_page_loss += on_the_same_page_loss.item()
                 if args.use_value_loss:
@@ -984,10 +968,6 @@ def train_pldm(args):
                          f"Avg Dynamics Loss: {avg_dynamics_loss:.4f}"
                 
                 # Add conditional metrics to report
-                if args.use_next_state_loss:
-                    avg_next_state_loss = total_next_state_loss / num_episodes
-                    report += f", Avg Next State Loss: {avg_next_state_loss:.4f}"
-                
                 if args.use_same_page_loss:
                     avg_on_the_same_page_loss = total_on_the_same_page_loss / num_episodes
                     report += f", Avg On-Same-Page Loss: {avg_on_the_same_page_loss:.4f}"
@@ -1056,7 +1036,6 @@ def parse_args():
     parser.add_argument('--heatmap', type=bool, default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
-    parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
     parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', type=bool, default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
@@ -1067,11 +1046,12 @@ def parse_args():
     parser.add_argument('--lambda_clip', type=float, default=0.0, help='Weight for clip loss') #was 1e-1. we don't use it now.
     parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
+    parser.add_argument('--lambda_entropy', type=float, default=0.0, help='Weight for policy entropy bonus')
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-1, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-1, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-1, help='Learning rate for value')
+    parser.add_argument('--encoder_lr', type=float, default=1e-3, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-3, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=1e-2, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
     # Precision parameters
@@ -1084,8 +1064,9 @@ def parse_args():
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
-    parser.add_argument('--base_reward', type=float, default=64, help='Base reward for each step')
+    parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
     parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: plmd or rl')
+
     return parser.parse_args()
 
 
