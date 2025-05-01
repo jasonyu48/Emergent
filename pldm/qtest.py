@@ -157,7 +157,7 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width,
     return distance_reward + same_room_bonus + base_reward
 
 
-def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_step_norm, use_quadrant=True, base_reward=64.0):
+def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, use_quadrant=True, base_reward=64.0):
     """Roll out a single episode using the model with parallel action search"""
     # Reset environment
     obs, info = env.reset()
@@ -170,42 +170,18 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
     next_goals = []
     reconstructions = []  # store decoded images
     
-    # Set up dtype
-    dtype = torch.bfloat16 if use_bf16 else torch.float32
-    
-    # Verify model is using the correct dtype
-    sample_param = next(model.parameters())
-    expected_dtype = torch.bfloat16 if use_bf16 else torch.float32
-    if sample_param.dtype != expected_dtype:
-        print(f"Warning: Model parameters have dtype {sample_param.dtype}, but expected {expected_dtype}")
-        print("Converting model to the correct dtype")
-        model = model.to(dtype)
-        # Verify conversion was successful
-        sample_param = next(model.parameters())
-        print(f"Model parameters dtype after conversion: {sample_param.dtype}")
-    
     # Encode initial state
     with torch.no_grad():
         if isinstance(obs, torch.Tensor):
-            obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+            obs_tensor = obs.to(device=device).unsqueeze(0)
         else:
-            obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
         
         # Ensure batch size is 1
         if obs_tensor.shape[0] != 1:
             obs_tensor = obs_tensor[:1]
             
-        # Verify tensor dtype before passing to model
-        if obs_tensor.dtype != dtype:
-            print(f"Warning: Input tensor dtype {obs_tensor.dtype} doesn't match expected {dtype}")
-            obs_tensor = obs_tensor.to(dtype)
-            
         z_t = model.encode(obs_tensor)
-        
-        # Verify encoding dtype
-        if z_t.dtype != dtype:
-            print(f"Warning: Encoded state z_t has dtype {z_t.dtype}, converting to {dtype}")
-            z_t = z_t.to(dtype)
         
         # Decode reconstruction and store
         with torch.no_grad():
@@ -223,38 +199,22 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
         
         # Predict next goal
         with torch.no_grad():
-            # Ensure z_t has the correct dtype
-            if z_t.dtype != dtype:
-                z_t = z_t.to(dtype)
-            
             z_next, log_prob = model.predict_next_goal(z_t)
-            
-            # Ensure z_next has the correct dtype
-            if z_next.dtype != dtype:
-                print(f"Warning: z_next has dtype {z_next.dtype}, converting to {dtype}")
-                z_next = z_next.to(dtype)
-                
             next_goals.append(z_next.cpu().numpy())
         
         # Search for action
         with torch.no_grad():
             a_t = model.search_action(
-                z_t.detach().to(dtype),  # Ensure correct dtype
-                z_next.detach().to(dtype),  # Ensure correct dtype
+                z_t.detach(),
+                z_next.detach(),
                 num_samples=num_samples,
                 max_step_norm=max_step_norm,
                 verbose=(step == 0),  # Verbose only on first step
                 use_quadrant=use_quadrant  # Use quadrant-based sampling if specified
             )
-            
-            # Ensure action has the correct dtype
-            if a_t.dtype != dtype:
-                print(f"Warning: Action a_t has dtype {a_t.dtype}, converting to {dtype}")
-                a_t = a_t.to(dtype)
         
         # Take action in environment
-        # Convert to float32 for CPU numpy operations, regardless of model dtype
-        action = a_t.to(torch.float32).cpu().numpy()[0]
+        action = a_t.cpu().numpy()[0]
         obs, env_reward, done, truncated, info = env.step(action)
         
         # Calculate custom reward based on distance instead of using environment reward
@@ -283,23 +243,15 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
         # Update encoding
         with torch.no_grad():
             if isinstance(obs, torch.Tensor):
-                obs_tensor = obs.to(dtype=dtype, device=device).unsqueeze(0)
+                obs_tensor = obs.to(device=device).unsqueeze(0)
             else:
-                obs_tensor = torch.tensor(obs, dtype=dtype, device=device).unsqueeze(0)
+                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             
             # Ensure batch size is 1
             if obs_tensor.shape[0] != 1:
                 obs_tensor = obs_tensor[:1]
             
-            # Verify tensor dtype before passing to model
-            if obs_tensor.dtype != dtype:
-                obs_tensor = obs_tensor.to(dtype)
-                
             z_t = model.encode(obs_tensor)
-            
-            # Verify encoding dtype
-            if z_t.dtype != dtype:
-                z_t = z_t.to(dtype)
             
             # Decode reconstruction for this new state
             with torch.no_grad():
@@ -325,7 +277,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, use_bf16, max_st
     }
 
 
-def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, use_bf16=False, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True, temperature=1.0, encoder_type='cnn', next_goal_temp=None, base_reward=64.0, search_mode='pldm'):
+def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True, temperature=1.0, encoder_type='cnn', next_goal_temp=None, base_reward=64.0, search_mode='pldm'):
     """Evaluate the trained model on the DotWall environment"""
     # Create output directory
     output_dir = Path(output_dir)
@@ -333,19 +285,6 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
     
     # Set up device
     device = torch.device(device)
-    
-    # Check if bf16 is supported on the current device
-    bf16_supported = (
-        use_bf16 and
-        torch.cuda.is_available() and
-        torch.cuda.is_bf16_supported()
-    )
-    
-    if use_bf16 and not bf16_supported:
-        print("Warning: BF16 precision requested but not supported on this device. Using FP32 instead.")
-    
-    if bf16_supported:
-        print("Using BFloat16 precision for evaluation")
     
     # Create environment
     env = DotWall(max_step_norm=max_step_norm, door_space=8)
@@ -381,40 +320,6 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
         model.load_state_dict(checkpoint)
         print("Loaded model directly from checkpoint")
     
-    # Convert model to bf16 if supported
-    if bf16_supported:
-        # Use the model's to() method to properly convert all parameters and buffers
-        model = model.to(torch.bfloat16)
-        print("Converted model to BFloat16")
-        
-        # Verify model is in BFloat16 mode by checking parameter dtype
-        sample_param = next(model.parameters())
-        print(f"Model parameters dtype: {sample_param.dtype}")
-        
-        # Verify all components of the model are in BFloat16
-        sample_encoder_param = next(model.encoder.parameters())
-        sample_dynamics_param = next(model.dynamics.parameters())
-        sample_goal_param = next(model.next_goal_predictor.parameters())
-        
-        print(f"Encoder parameters dtype: {sample_encoder_param.dtype}")
-        print(f"Dynamics parameters dtype: {sample_dynamics_param.dtype}")
-        print(f"NextGoalPredictor parameters dtype: {sample_goal_param.dtype}")
-        
-        # Explicitly check and convert Conv2d biases
-        for module in model.modules():
-            if isinstance(module, nn.Conv2d) and module.bias is not None:
-                if module.bias.dtype != torch.bfloat16:
-                    print(f"Converting Conv2d bias from {module.bias.dtype} to BFloat16")
-                    module.bias = nn.Parameter(module.bias.to(torch.bfloat16))
-                else:
-                    print(f"Conv2d bias already in BFloat16")
-                    
-        # Verify conversion one more time
-        for module in model.encoder.modules():
-            if isinstance(module, nn.Conv2d) and module.bias is not None:
-                print(f"Final Conv2d bias check - dtype: {module.bias.dtype}")
-                break
-    
     # Set model to evaluation mode
     model.eval()
     print("Using parallel action search with", num_samples, "samples per step")
@@ -434,7 +339,6 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
             max_steps=max_steps,
             num_samples=num_samples,
             device=device,
-            use_bf16=bf16_supported,
             max_step_norm=max_step_norm,
             use_quadrant=use_quadrant,
             base_reward=base_reward
@@ -510,15 +414,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
     # Model path and output directory
-    parser.add_argument('--model_path', type=str, default='output_same_page_value6/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value6', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_same_page_value8/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save test results')
     
     # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                        help='Device to run on')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to evaluate')
     parser.add_argument('--max_steps', type=int, default=32, help='Maximum steps per episode')
-    parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 precision for evaluation')
     
     # Action parameters
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
@@ -529,11 +432,11 @@ def parse_args():
     parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
-    parser.add_argument('--temperature', type=float, default=0.9, help='Temperature for discrete softmax')
+    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
-    parser.add_argument('--next_goal_temp', type=float, default=10.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
-    parser.add_argument('--base_reward', type=float, default=64.0, help='Base reward for each step')
-    parser.add_argument('--search_mode', type=str, default='pldm', choices=['pldm','rl'], help='Action search mode: pldm or rl')
+    parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
+    parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
+    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
     
     return parser.parse_args()
 
@@ -546,7 +449,6 @@ if __name__ == '__main__':
         num_episodes=args.num_episodes,
         max_steps=args.max_steps,
         num_samples=args.num_samples,
-        use_bf16=args.bf16,
         max_step_norm=args.max_step_norm,
         encoder_embedding=args.encoder_embedding,
         encoding_dim=args.encoding_dim,

@@ -101,7 +101,7 @@ def compute_returns(rewards, gamma=0.99):
     return returns
 
 
-def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100, use_quadrant=True):
+def rollout(model, env, max_steps=100, device='cpu', num_samples=100, use_quadrant=True):
     """Perform a single rollout in the environment using the PLDM model"""
     # Reset environment
     obs, info = env.reset()
@@ -116,53 +116,17 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
     # Ensure model is in evaluation mode during rollout
     model.eval()
     
-    # Get dtype based on bf16 setting
-    dtype = torch.bfloat16 if bf16 else torch.float32
-    
-    # Verify model is using the correct dtype
-    sample_param = next(model.parameters())
-    if sample_param.dtype != dtype:
-        print(f"Warning: Model dtype ({sample_param.dtype}) doesn't match requested dtype ({dtype})")
-        print("Converting model to the correct dtype")
-        model = model.to(dtype)
-        # Verify conversion was successful
-        sample_param = next(model.parameters())
-        print(f"Model parameters dtype after conversion: {sample_param.dtype}")
-        
-        # Double-check Conv2d bias which often causes issues
-        for module in model.encoder.modules():
-            if isinstance(module, nn.Conv2d) and module.bias is not None:
-                if module.bias.dtype != dtype:
-                    print(f"Warning: Conv2d bias still has dtype {module.bias.dtype}, forcing conversion to {dtype}")
-                    module.bias = nn.Parameter(module.bias.to(dtype))
-                else:
-                    print(f"Conv2d bias correctly has dtype {dtype}")
-                break
-    
     # Get initial encoding
     with torch.no_grad():
         # Convert observation to tensor properly
         if isinstance(obs, torch.Tensor):
-            obs_tensor = obs.to(dtype=dtype, device=device)
+            obs_tensor = obs.to(device=device)
         else:
-            obs_tensor = torch.tensor(obs, dtype=dtype, device=device)
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device)
         obs_tensor = obs_tensor.unsqueeze(0)
         
         # Encode current observation
-        try:
-            z_t = model.encode(obs_tensor)
-        except RuntimeError as e:
-            if "Input type" in str(e) and "bias type" in str(e):
-                print(f"BFloat16 conversion error: {e}")
-                print("Attempting to fix Conv2d bias dtype issue...")
-                
-                # Fix bias issue in specific conv layers
-                for module in model.encoder.modules():
-                    if isinstance(module, nn.Conv2d) and module.bias is not None:
-                        module.bias = nn.Parameter(module.bias.to(dtype))
-                
-                # Try encoding again
-                z_t = model.encode(obs_tensor)
+        z_t = model.encode(obs_tensor)
         
     # Rollout loop
     done = False
@@ -175,10 +139,6 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
         
         # Predict next goal
         with torch.no_grad():
-            # Ensure z_t has correct dtype
-            if z_t.dtype != dtype:
-                z_t = z_t.to(dtype)
-                
             z_next, log_prob = model.predict_next_goal(z_t)
             next_goals.append(z_next.squeeze(0).cpu())
             log_probs.append(log_prob.item())
@@ -189,15 +149,14 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
         
         # Search for action using detached tensors
         a_t = model.search_action(
-            z_t_detached.to(dtype), 
-            z_next_detached.to(dtype), 
+            z_t_detached, 
+            z_next_detached, 
             num_samples=num_samples,
             use_quadrant=use_quadrant
         )
 
         # Take action in environment
-        # Convert to float32 before converting to NumPy since NumPy doesn't support bfloat16
-        action = a_t.to(torch.float32).cpu().numpy()[0]
+        action = a_t.cpu().numpy()[0]
         obs, reward, done, truncated, info = env.step(action)
 
         # ----------------------------------------------------------------------------------
@@ -222,9 +181,9 @@ def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100
         with torch.no_grad():
             # Convert observation to tensor
             if isinstance(obs, torch.Tensor):
-                obs_tensor = obs.to(dtype=dtype, device=device)
+                obs_tensor = obs.to(device=device)
             else:
-                obs_tensor = torch.tensor(obs, dtype=dtype, device=device)
+                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device)
             obs_tensor = obs_tensor.unsqueeze(0)
             
             # Encode next observation
@@ -286,7 +245,7 @@ def calculate_custom_reward(states, env):
 class ParallelEpisodeCollector:
     """Collect episodes in parallel for faster training"""
     
-    def __init__(self, model, env_creator, max_steps, device, bf16_supported, 
+    def __init__(self, model, env_creator, max_steps, device, 
                  num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, num_samples=100, use_quadrant=True):
         """
         Initialize parallel episode collector
@@ -296,7 +255,6 @@ class ParallelEpisodeCollector:
             env_creator: Function that creates a new environment instance
             max_steps: Maximum steps per episode
             device: Device to run computation on
-            bf16_supported: Whether BF16 precision is supported
             num_workers: Number of parallel workers
             prefetch_queue_size: Size of the prefetch queue for episodes
             use_gpu_for_inference: Whether to use GPU for inference during rollout
@@ -307,7 +265,6 @@ class ParallelEpisodeCollector:
         self.env_creator = env_creator
         self.max_steps = max_steps
         self.device = device
-        self.bf16_supported = bf16_supported
         self.num_workers = num_workers
         self.use_gpu_for_inference = use_gpu_for_inference
         self.num_samples = num_samples
@@ -344,29 +301,11 @@ class ParallelEpisodeCollector:
                 if self.use_gpu_for_inference:
                     # Use GPU with lock to prevent race conditions
                     with self.gpu_lock:
-                        # Ensure model is properly converted to BFloat16 if needed
-                        if self.bf16_supported:
-                            # Verify model is in BFloat16 mode
-                            sample_param = next(self.model.parameters())
-                            if sample_param.dtype != torch.bfloat16:
-                                print(f"Converting worker {worker_id} model to BFloat16 (current dtype: {sample_param.dtype})")
-                                self.model = self.model.to(torch.bfloat16)
-                                # Verify conversion was successful
-                                sample_param = next(self.model.parameters())
-                                print(f"Worker {worker_id} model parameters dtype after conversion: {sample_param.dtype}")
-                                
-                                # Check a Conv2d bias specifically (they often cause issues)
-                                for module in self.model.encoder.modules():
-                                    if isinstance(module, nn.Conv2d) and module.bias is not None:
-                                        print(f"Worker {worker_id} Conv2d bias dtype: {module.bias.dtype}")
-                                        break
-                        
                         trajectory = rollout(
                             self.model,  # Use the shared GPU model
                             env,
                             max_steps=self.max_steps,
                             device=self.device,  # Use GPU for inference
-                            bf16=self.bf16_supported,
                             num_samples=self.num_samples,
                             use_quadrant=self.use_quadrant
                         )
@@ -379,7 +318,6 @@ class ParallelEpisodeCollector:
                         env,
                         max_steps=self.max_steps,
                         device='cpu',  # Use CPU for inference
-                        bf16=False,    # Use FP32 on CPU for stability
                         num_samples=self.num_samples,
                         use_quadrant=self.use_quadrant
                     )
@@ -556,34 +494,6 @@ def train_pldm(args):
     # Set up device
     device = torch.device(args.device)
     
-    # Check if bf16 is supported on the current device
-    bf16_supported = (
-        args.bf16 and
-        torch.cuda.is_available() and
-        torch.cuda.is_bf16_supported()
-    )
-    
-    if args.bf16 and not bf16_supported:
-        print("Warning: BF16 precision requested but not supported on this device. Using FP32 instead.")
-    
-    # Set up mixed precision training
-    if torch.cuda.is_available():
-        if bf16_supported:
-            print("Using BFloat16 mixed precision training")
-            amp_dtype = torch.bfloat16
-            # Optional: enable autocast globally
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-        else:
-            print("Using FP32 training")
-            amp_dtype = None
-    else:
-        print("Mixed precision not available, using FP32")
-        amp_dtype = None
-    
-    # Create scaler for mixed precision training
-    scaler = torch.amp.GradScaler('cuda', enabled=amp_dtype is not None and amp_dtype == torch.float16)
-    
     # Environment creation function for parallel workers
     def create_env():
         return DotWall(max_step_norm=args.max_step_norm, door_space=8)
@@ -608,10 +518,6 @@ def train_pldm(args):
     
     # Print model parameter counts
     model.print_parameter_count()
-    
-    # Convert model to mixed precision if supported
-    if amp_dtype is not None:
-        print(f"Model will use {amp_dtype} precision during forward pass")
     
     # ---------------------------------------------------------------
     # Separate parameter groups: encoder, dynamics, policy-net, value-net, decoder
@@ -672,10 +578,6 @@ def train_pldm(args):
         if 'optimizer_state_dict' in checkpoint:
             # New single optimizer format
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            
-            # If using FP16, load scaler state
-            if 'scaler_state_dict' in checkpoint and amp_dtype == torch.float16:
-                scaler.load_state_dict(checkpoint['scaler_state_dict'])
                 
         start_epoch = checkpoint.get('epoch', 0) + 1
         global_step = checkpoint.get('global_step', 0)
@@ -709,7 +611,6 @@ def train_pldm(args):
         env_creator=create_env,
         max_steps=args.max_steps_per_episode,
         device=device,
-        bf16_supported=bf16_supported,
         num_workers=num_workers,
         use_gpu_for_inference=args.use_gpu_inference,  # Use GPU for inference since we have a powerful A100
         num_samples=args.num_samples,
@@ -805,91 +706,90 @@ def train_pldm(args):
                 # ------------------------------------------------------------
                 batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
 
-                with torch.amp.autocast('cuda', enabled=amp_dtype is not None, dtype=amp_dtype):
-                    # --------------------------------------------------------
-                    # Vectorised computation over the whole batch
-                    # --------------------------------------------------------
+                # --------------------------------------------------------
+                # Vectorised computation over the whole batch
+                # --------------------------------------------------------
 
-                    # Stack tensors
-                    S_t = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
-                                      for s in batch_states]).float().detach()
-                    S_next = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
-                                         for s in batch_next_states]).float().detach()
-                    A_t = torch.stack(batch_actions).to(device).float().detach()
-                    NG_store = torch.stack(batch_next_goals).to(device).float().detach()
+                # Stack tensors
+                S_t = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
+                                  for s in batch_states]).float().detach()
+                S_next = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
+                                     for s in batch_next_states]).float().detach()
+                A_t = torch.stack(batch_actions).to(device).float().detach()
+                NG_store = torch.stack(batch_next_goals).to(device).float().detach()
 
-                    # Encode in one shot
-                    Z_t = model.encode(S_t)
+                # Encode in one shot
+                Z_t = model.encode(S_t)
 
-                    if global_step % args.log_steps == 0 and args.heatmap:
-                        # save a heatmap of Z_t, make the heat map larger
-                        plt.figure(figsize=(10, 10))
-                        plt.imshow(Z_t.cpu().detach().numpy())
-                        plt.savefig(f"{args.output_dir}/heatmap_{global_step}.png")
-                        plt.close()
+                if global_step % args.log_steps == 0 and args.heatmap:
+                    # save a heatmap of Z_t, make the heat map larger
+                    plt.figure(figsize=(10, 10))
+                    plt.imshow(Z_t.cpu().detach().numpy())
+                    plt.savefig(f"{args.output_dir}/heatmap_{global_step}.png")
+                    plt.close()
 
-                    Z_next_actual = model.encode(S_next)
+                Z_next_actual = model.encode(S_next)
 
-                    # Policy log-prob (no grad through stored goal)
-                    log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
+                # Policy log-prob (no grad through stored goal)
+                log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
-                    # Value prediction
-                    V_pred = model.next_goal_predictor.value(Z_t.detach())
+                # Value prediction
+                V_pred = model.next_goal_predictor.value(Z_t.detach())
 
-                    # Dynamics prediction
-                    Z_next_pred = model.dynamics(Z_t.detach(),A_t)
+                # Dynamics prediction
+                Z_next_pred = model.dynamics(Z_t.detach(),A_t)
 
-                    # ---------------- losses ----------------
-                    # KL divergence between predicted and target probability distributions
-                    eps = 1e-10
-                    dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual.detach(), reduction='batchmean')
+                # ---------------- losses ----------------
+                # KL divergence between predicted and target probability distributions
+                eps = 1e-10
+                dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual.detach(), reduction='batchmean')
 
-                    # ------------------------------------------------------------------
-                    #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
-                    # ------------------------------------------------------------------
-                    avg_mag_z_t         = Z_t.norm(dim=-1).mean().item()
-                    avg_mag_z_next_pred = Z_next_pred.norm(dim=-1).mean().item()
-                    avg_mag_ng_store    = NG_store.norm(dim=-1).mean().item()
+                # ------------------------------------------------------------------
+                #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
+                # ------------------------------------------------------------------
+                avg_mag_z_t         = Z_t.norm(dim=-1).mean().item()
+                avg_mag_z_next_pred = Z_next_pred.norm(dim=-1).mean().item()
+                avg_mag_ng_store    = NG_store.norm(dim=-1).mean().item()
 
-                    if global_step % args.log_steps == 0:
-                        tqdm.write(
-                             f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
-                        )
-
-                        # Count distinct discrete codes in this batch
-                        z_codes = Z_t.argmax(dim=1)
-                        ng_codes = NG_store.argmax(dim=1)
-                        num_z_codes = int(torch.unique(z_codes).numel())
-                        num_ng_codes = int(torch.unique(ng_codes).numel())
-                        tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
-
-                    if args.use_same_page_loss:
-                        # Use KL divergence between policy-proposed goal and encoder latent distribution
-                        pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
-                        on_the_same_page_loss = F.kl_div((pseudo_next_goal + eps).log(), Z_t.detach(), reduction='batchmean')
-                    else:
-                        on_the_same_page_loss = torch.tensor(0.0, device=device)
-
-                    # Advantage / policy loss
-                    advantage = batch_returns_tensor - V_pred  # V_pred detached above
-                    norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
-                    policy_loss = -(log_probs * norm_advantage).mean()
-
-                    # Value loss
-                    value_loss = F.mse_loss(V_pred, batch_returns_tensor)
-
-                    # Entropy bonus for exploration
-                    dist_ent = model.next_goal_predictor._get_distribution(Z_t)
-                    entropy = dist_ent.entropy().mean()
-                    writer.add_scalar('Stats/entropy', entropy.item(), global_step)
-                    # Total loss including entropy bonus
-                    loss = (
-                        args.lambda_policy * policy_loss
-                        + args.lambda_dynamics * dynamics_loss
-                        + args.lambda_value * value_loss
-                        + args.lambda_same_page * on_the_same_page_loss
-                        - args.lambda_entropy * entropy
+                if global_step % args.log_steps == 0:
+                    tqdm.write(
+                         f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
                     )
+
+                    # Count distinct discrete codes in this batch
+                    z_codes = Z_t.argmax(dim=1)
+                    ng_codes = NG_store.argmax(dim=1)
+                    num_z_codes = int(torch.unique(z_codes).numel())
+                    num_ng_codes = int(torch.unique(ng_codes).numel())
+                    tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
+
+                if args.use_same_page_loss:
+                    # Use KL divergence between policy-proposed goal and encoder latent distribution
+                    pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
+                    on_the_same_page_loss = F.kl_div((pseudo_next_goal + eps).log(), Z_t.detach(), reduction='batchmean')
+                else:
+                    on_the_same_page_loss = torch.tensor(0.0, device=device)
+
+                # Advantage / policy loss
+                advantage = batch_returns_tensor - V_pred  # V_pred detached above
+                norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
+                policy_loss = -(log_probs * norm_advantage).mean()
+
+                # Value loss
+                value_loss = F.mse_loss(V_pred, batch_returns_tensor)
+
+                # Entropy bonus for exploration
+                dist_ent = model.next_goal_predictor._get_distribution(Z_t)
+                entropy = dist_ent.entropy().mean()
+                writer.add_scalar('Stats/entropy', entropy.item(), global_step)
+                # Total loss including entropy bonus
+                loss = (
+                    args.lambda_policy * policy_loss
+                    + args.lambda_dynamics * dynamics_loss
+                    + args.lambda_value * value_loss
+                    + args.lambda_same_page * on_the_same_page_loss
+                    - args.lambda_entropy * entropy
+                )
 
                 # Log encoder grad sources
                 encoder_params_list = [p for p in model.encoder.parameters() if p.requires_grad]
@@ -917,13 +817,8 @@ def train_pldm(args):
                     _log_encoder_grad_sources(dynamics_params_list, loss_contributions, global_step, prefix="DynamicsGradSources")
 
                 # Optimizer step
-                if amp_dtype == torch.float16:
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    optimizer.step()
+                loss.backward()
+                optimizer.step()
                 if global_step % args.log_steps == 0:
                     _log_grad_update_stats(model, optimizer, global_step)
                 optimizer.zero_grad()
@@ -993,10 +888,6 @@ def train_pldm(args):
                 'best_reward': best_reward,
                 'global_step': global_step
             }
-            
-            # Add scaler state dict if using FP16
-            if amp_dtype == torch.float16:
-                checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
                 
             torch.save(checkpoint_dict, output_dir / 'checkpoint.pt')
             
@@ -1054,9 +945,6 @@ def parse_args():
     parser.add_argument('--value_lr', type=float, default=1e-2, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
-    # Precision parameters
-    parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
-    
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
@@ -1065,7 +953,7 @@ def parse_args():
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
     parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
-    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: plmd or rl')
+    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
 
     return parser.parse_args()
 

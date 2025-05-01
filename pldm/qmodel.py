@@ -472,7 +472,6 @@ class PLDMModel(nn.Module):
             return self.rl_actions[idxs]
         # default PLDM search follows below
         # Keep track of device and dtype
-        dtype = z_t.dtype
         device = z_t.device
         batch_size = z_t.shape[0]
 
@@ -480,8 +479,8 @@ class PLDMModel(nn.Module):
         
         if verbose:
             print(f"Starting parallel action search with {num_samples} samples")
-            print(f"z_t shape: {z_t.shape}, dtype: {dtype}")
-            print(f"z_target shape: {z_target.shape}, dtype: {dtype}")
+            print(f"z_t shape: {z_t.shape}")
+            print(f"z_target shape: {z_target.shape}")
             print(f"Sampling from {'quadrant' if use_quadrant else 'full action space'}")
         
         # Ensure inputs are detached to avoid gradient tracking
@@ -507,7 +506,7 @@ class PLDMModel(nn.Module):
             # Sample actions uniformly in [0, max_step_norm] then assign signs
             sampled_actions = (
                 torch.rand(batch_size, num_samples, self.action_dim,
-                          device=device, dtype=dtype) * max_step_norm
+                          device=device) * max_step_norm
             )
             sampled_actions[..., 0] *= sign_x
             sampled_actions[..., 1] *= sign_y
@@ -520,7 +519,7 @@ class PLDMModel(nn.Module):
             # ------------------------------------------------------------------
             sampled_actions = (
                 torch.rand(batch_size, num_samples, self.action_dim,
-                          device=device, dtype=dtype) * 2 * max_step_norm - max_step_norm
+                          device=device) * 2 * max_step_norm - max_step_norm
             )
 
         # Expand z_t / z_target to match the sampled actions
@@ -566,48 +565,6 @@ class PLDMModel(nn.Module):
                 print(f"Best actions: {best_actions.cpu().numpy()}")
         
         return best_actions
-    
-    def to(self, *args, **kwargs):
-        """
-        Moves and/or casts the parameters and buffers.
-        
-        This method has the same functionality as PyTorch's nn.Module.to() method,
-        but ensures all parameters and buffers of the model are properly converted
-        to the same dtype, which is important for mixed precision training.
-        """
-        # Call the parent class's to() method to handle the actual conversion
-        device_or_dtype = args[0] if args else kwargs.get('device', None) or kwargs.get('dtype', None)
-        
-        # If we're converting to BFloat16, we need to be extra careful
-        if device_or_dtype == torch.bfloat16 or kwargs.get('dtype') == torch.bfloat16:
-            print("Converting model to BFloat16 with special handling")
-            
-            # First convert the entire model structure
-            model = super().to(*args, **kwargs)
-            
-            # Explicitly convert all parameters and buffers in submodules
-            for module in model.modules():
-                for param_name, param in module._parameters.items():
-                    if param is not None:
-                        module._parameters[param_name] = param.to(torch.bfloat16)
-                
-                for buffer_name, buffer in module._buffers.items():
-                    if buffer is not None:
-                        module._buffers[buffer_name] = buffer.to(torch.bfloat16)
-            
-            # Specifically check that encoder's conv layers have BF16 bias
-            for module in model.encoder.modules():
-                if isinstance(module, nn.Conv2d):
-                    if module.bias is not None:
-                        # Double-check the bias tensor
-                        if module.bias.dtype != torch.bfloat16:
-                            print(f"Converting Conv2d bias from {module.bias.dtype} to BFloat16")
-                            module.bias = nn.Parameter(module.bias.to(torch.bfloat16))
-            
-            return model
-        else:
-            # For other dtypes, use the standard method
-            return super().to(*args, **kwargs)
     
     def print_parameter_count(self):
         """Prints the number of parameters for each component of the model"""
