@@ -778,10 +778,14 @@ def train_pldm(args):
                 # Value loss
                 value_loss = F.mse_loss(V_pred, batch_returns_tensor)
 
-                # Entropy bonus for exploration, compute manually for numerical stability
-                dist = model.next_goal_predictor.get_numerical_stable_distribution(Z_t)
-                entropy = - (dist * (dist + 1e-10).log()).sum(dim=-1).mean()
-                writer.add_scalar('Stats/entropy', entropy.item(), global_step)
+                if args.lambda_entropy > 0:
+                    # Entropy bonus for exploration, compute manually for numerical stability
+                    dist = model.next_goal_predictor.get_numerical_stable_distribution(Z_t)
+                    entropy = - (dist * (dist + 1e-10).log()).sum(dim=-1).mean()
+                    writer.add_scalar('Stats/entropy', entropy.item(), global_step)
+                else:
+                    entropy = torch.tensor(0.0, device=device)
+
                 # Total loss including entropy bonus
                 loss = (
                     args.lambda_policy * policy_loss
