@@ -778,9 +778,9 @@ def train_pldm(args):
                 # Value loss
                 value_loss = F.mse_loss(V_pred, batch_returns_tensor)
 
-                # Entropy bonus for exploration
-                dist_ent = model.next_goal_predictor._get_distribution(Z_t)
-                entropy = dist_ent.entropy().mean()
+                # Entropy bonus for exploration, compute manually for numerical stability
+                dist = model.next_goal_predictor.get_numerical_stable_distribution(Z_t)
+                entropy = - (dist * (dist + 1e-10).log()).sum(dim=-1).mean()
                 writer.add_scalar('Stats/entropy', entropy.item(), global_step)
                 # Total loss including entropy bonus
                 loss = (
@@ -818,6 +818,7 @@ def train_pldm(args):
 
                 # Optimizer step
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e0)
                 optimizer.step()
                 if global_step % args.log_steps == 0:
                     _log_grad_update_stats(model, optimizer, global_step)
@@ -915,11 +916,11 @@ def parse_args():
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
+    parser.add_argument('--updates_per_epoch', type=int, default=64, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
-    parser.add_argument('--gamma', type=float, default=0.1, help='Discount factor')
+    parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
@@ -934,14 +935,12 @@ def parse_args():
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
-    parser.add_argument('--lambda_clip', type=float, default=0.0, help='Weight for clip loss') #was 1e-1. we don't use it now.
-    parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
-    parser.add_argument('--lambda_entropy', type=float, default=0.0, help='Weight for policy entropy bonus')
+    parser.add_argument('--lambda_entropy', type=float, default=1e-3, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-3, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-3, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
+    parser.add_argument('--encoder_lr', type=float, default=1e-2, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-2, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=1e-2, help='Learning rate for policy')
     parser.add_argument('--value_lr', type=float, default=1e-2, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
