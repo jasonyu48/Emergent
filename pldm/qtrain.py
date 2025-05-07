@@ -1,23 +1,15 @@
 from typing import Optional
 import os
-import shutil
-from dataclasses import dataclass
-import dataclasses
 import random
 import time
 from omegaconf import MISSING
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-import torch.amp  # Add this import for mixed precision training
-import numpy as np
 from tqdm.auto import tqdm
 from matplotlib import pyplot as plt
 import matplotlib
-import gymnasium as gym
 import argparse
 from pathlib import Path
 import threading
@@ -25,18 +17,11 @@ import queue
 from concurrent.futures import ThreadPoolExecutor
 import copy
 
-from pldm.logger import Logger, MetricTracker
-
 try:
     import multiprocessing
     multiprocessing.set_start_method("fork")  # noqa
 except Exception:
     pass
-
-from pldm.configs import ConfigBase
-from pldm.data.enums import DataConfig
-from pldm.data.utils import get_optional_fields
-import pldm.utils as utils
 
 from pldm_envs.wall.wall import DotWall
 from pldm.qmodel import PLDMModel
@@ -328,7 +313,7 @@ class ParallelEpisodeCollector:
                     
                 # Put episode in queue
                 try:
-                    self.episode_queue.put(trajectory, block=True, timeout=5.0)
+                    self.episode_queue.put(trajectory, block=True, timeout=None)
                 except queue.Full:
                     # If queue is full, skip this episode
                     pass
@@ -434,7 +419,7 @@ def _log_encoder_grad_sources(params, loss_dict, step_idx=0, prefix="EncGradSour
     """
     stats = {}
     for name, loss in loss_dict.items():
-        if loss is None:
+        if loss is None or loss.requires_grad == False:
             continue
         # Compute grads w.r.t params WITHOUT accumulating into .grad
         grads = torch.autograd.grad(
@@ -704,7 +689,18 @@ def train_pldm(args):
                 # ------------------------------------------------------------
                 # 3) Compute losses on the sampled batch
                 # ------------------------------------------------------------
+                # ------------------------------------------------------------------
+                # (NEW) Return normalisation for a more stable value-function target.
+                # This rescales *R_t* to zero-mean, unit-std on every minibatch which
+                # reduces the dynamic range of the value-head gradients and makes
+                # NaN explosions far less likely.
+                # ------------------------------------------------------------------
                 batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
+
+                if args.normalize_returns_and_advantage:
+                    mean_R = batch_returns_tensor.mean()
+                    std_R  = batch_returns_tensor.std(unbiased=False).clamp(min=1e-4)
+                    batch_returns_tensor = (batch_returns_tensor - mean_R) / std_R
 
                 # --------------------------------------------------------
                 # Vectorised computation over the whole batch
@@ -733,6 +729,14 @@ def train_pldm(args):
                 # Policy log-prob (no grad through stored goal)
                 log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
+                # ------------------------------------------------------------------
+                # Numerical guard: clamp extremely small probabilities so that
+                # log_probs does not contain -inf.  The specific threshold (-20)
+                # corresponds to prob ≈ 2×10⁻⁹ and is plenty small for learning
+                # while preventing 0 * (-inf) → NaN in the policy-loss below.
+                # ------------------------------------------------------------------
+                log_probs = torch.clamp(log_probs, min=-20.0)
+
                 # Value prediction
                 V_pred = model.next_goal_predictor.value(Z_t.detach())
 
@@ -741,7 +745,7 @@ def train_pldm(args):
 
                 # ---------------- losses ----------------
                 # KL divergence between predicted and target probability distributions
-                eps = 1e-10
+                eps = 1e-8
                 dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual.detach(), reduction='batchmean')
 
                 # ------------------------------------------------------------------
@@ -764,24 +768,28 @@ def train_pldm(args):
                     tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
 
                 if args.use_same_page_loss:
-                    # Use KL divergence between policy-proposed goal and encoder latent distribution
-                    pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
-                    on_the_same_page_loss = F.kl_div((pseudo_next_goal + eps).log(), Z_t.detach(), reduction='batchmean')
+                    on_the_same_page_loss = torch.tensor(0.0, device=device)
+                    print("on_the_same_page_loss is not implemented")
                 else:
                     on_the_same_page_loss = torch.tensor(0.0, device=device)
 
-                # Advantage / policy loss
-                advantage = batch_returns_tensor - V_pred  # V_pred detached above
-                norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
-                policy_loss = -(log_probs * norm_advantage).mean()
+                # Advantage / policy loss – use the (possibly) normalised returns
+                advantage = (batch_returns_tensor - V_pred).detach()
+                if args.normalize_returns_and_advantage:
+                    norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + eps)
+                else:
+                    norm_advantage = advantage
+                # Guard against any residual NaNs coming from 0×(inf) products.
+                policy_loss_tensor = -(log_probs * norm_advantage)
+                policy_loss = torch.nan_to_num(policy_loss_tensor, nan=0.0, posinf=0.0, neginf=0.0).mean()
 
                 # Value loss
-                value_loss = F.mse_loss(V_pred, batch_returns_tensor)
+                value_loss = F.smooth_l1_loss(V_pred, batch_returns_tensor)
 
                 if args.lambda_entropy > 0:
                     # Entropy bonus for exploration, compute manually for numerical stability
                     dist = model.next_goal_predictor.get_numerical_stable_distribution(Z_t)
-                    entropy = - (dist * (dist + 1e-10).log()).sum(dim=-1).mean()
+                    entropy = - (dist * (dist + eps).log()).sum(dim=-1).mean()
                     writer.add_scalar('Stats/entropy', entropy.item(), global_step)
                 else:
                     entropy = torch.tensor(0.0, device=device)
@@ -822,7 +830,12 @@ def train_pldm(args):
 
                 # Optimizer step
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e0)
+                # First, clip gradients on the value head a bit harder — it is
+                # the most common source of exploding weights.
+                torch.nn.utils.clip_grad_norm_(model.next_goal_predictor.value_mlp.parameters(), max_norm=0.3)
+
+                # Then clip the entire model to a reasonable global norm.
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 if global_step % args.log_steps == 0:
                     _log_grad_update_stats(model, optimizer, global_step)
@@ -920,39 +933,40 @@ def parse_args():
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--updates_per_epoch', type=int, default=64, help='Number of training updates (batches of transitions) per epoch')
-    parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
+    parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
+    parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
-    parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=64, help='Logging frequency for gradient statistics')
-    parser.add_argument('--heatmap', type=bool, default=False, help='Save a heatmap of Z_t')
-    parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
+    parser.add_argument('--num_workers', type=int, default=1, help='Number of parallel workers for episode collection')
+    parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
+    parser.add_argument('--log_steps', type=int, default=32, help='Logging frequency for gradient statistics')
+    parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
+    parser.add_argument('--use_quadrant', action='store_true', default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
-    parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
-    parser.add_argument('--use_decoder_loss', type=bool, default=False, help='Enable decoder reconstruction warm-up loss')
-    parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
+    parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
+    parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
+    parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
+    parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
+    parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
-    parser.add_argument('--lambda_entropy', type=float, default=1e-3, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
+    parser.add_argument('--lambda_entropy', type=float, default=5e-5, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-2, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-2, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-2, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-2, help='Learning rate for value')
+    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-5, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=1e-6, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=1e-5, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
     parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
-    parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
+    parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
     parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
@@ -963,4 +977,5 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    torch.autograd.set_detect_anomaly(True)     # catches backward NaNs
     train_pldm(args)
