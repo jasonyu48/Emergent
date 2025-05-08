@@ -729,14 +729,6 @@ def train_pldm(args):
                 # Policy log-prob (no grad through stored goal)
                 log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
-                # ------------------------------------------------------------------
-                # Numerical guard: clamp extremely small probabilities so that
-                # log_probs does not contain -inf.  The specific threshold (-20)
-                # corresponds to prob ≈ 2×10⁻⁹ and is plenty small for learning
-                # while preventing 0 * (-inf) → NaN in the policy-loss below.
-                # ------------------------------------------------------------------
-                log_probs = torch.clamp(log_probs, min=-20.0)
-
                 # Value prediction
                 V_pred = model.next_goal_predictor.value(Z_t.detach())
 
@@ -779,9 +771,8 @@ def train_pldm(args):
                     norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + eps)
                 else:
                     norm_advantage = advantage
-                # Guard against any residual NaNs coming from 0×(inf) products.
-                policy_loss_tensor = -(log_probs * norm_advantage)
-                policy_loss = torch.nan_to_num(policy_loss_tensor, nan=0.0, posinf=0.0, neginf=0.0).mean()
+
+                policy_loss = -(log_probs * norm_advantage)
 
                 # Value loss
                 value_loss = F.smooth_l1_loss(V_pred, batch_returns_tensor)
