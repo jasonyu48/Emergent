@@ -286,7 +286,8 @@ class NextGoalPredictor(nn.Module):
     def forward(self, z_t):
         x = self._compute_features(z_t)
         logits = self.output_proj(x)              # [B, 512]
-        dist = Categorical(logits=logits / self.temperature)
+        eps = 1e-5
+        dist = Categorical(logits=(logits + eps) / (self.temperature))
         idx  = dist.sample()                      # [B]
         z_next = F.one_hot(idx, num_classes=NUM_CODES).float()
         log_prob = dist.log_prob(idx)             # [B]
@@ -307,9 +308,10 @@ class NextGoalPredictor(nn.Module):
         return x
     
     def _get_distribution(self, z_t):
-        """Return Normal distribution N(mean(z_t), 1)."""
         logits = self.output_proj(self._compute_features(z_t))
-        return Categorical(logits=logits / self.temperature)
+        # improve numerical stability
+        eps = 1e-5
+        return Categorical(logits=(logits + eps) / (self.temperature))
     
     # ------------------------------------------------------------------
     #  Value prediction

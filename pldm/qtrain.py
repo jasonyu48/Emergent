@@ -841,15 +841,15 @@ def train_pldm(args):
                     log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
                     # Value prediction
-                    V_pred = model.next_goal_predictor.value(Z_t.detach())
+                    V_pred = model.next_goal_predictor.value(Z_t)
 
                     # Dynamics prediction
-                    Z_next_pred = model.dynamics(Z_t.detach(),A_t)
+                    Z_next_pred = model.dynamics(Z_t,A_t)
 
                     # ---------------- losses ----------------
                     # KL divergence between predicted and target probability distributions
                     eps = 1e-10
-                    dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual.detach(), reduction='batchmean')
+                    dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual, reduction='batchmean')
 
                     # ------------------------------------------------------------------
                     #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
@@ -876,8 +876,8 @@ def train_pldm(args):
 
                     # Advantage / policy loss
                     advantage = (batch_returns_tensor - V_pred).detach()  # V_pred detached above
-                    norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
-                    policy_loss = -(log_probs * norm_advantage).mean()
+                    # norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
+                    policy_loss = -(log_probs * advantage).mean()
 
                     # Value loss
                     value_loss = F.mse_loss(V_pred, batch_returns_tensor)
@@ -1031,19 +1031,19 @@ def parse_args():
     parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state (default 512 for discrete codes)')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
-    parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
+    parser.add_argument('--encoder_type', type=str, default='vit', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=500, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
-    parser.add_argument('--gamma', type=float, default=0.1, help='Discount factor')
+    parser.add_argument('--gamma', type=float, default=0.8, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers for episode collection')
+    parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=64, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=32, help='Logging frequency for gradient statistics')
     parser.add_argument('--heatmap', type=bool, default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
@@ -1053,7 +1053,7 @@ def parse_args():
     parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
+    parser.add_argument('--lambda_policy', type=float, default=1e-5, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
 
@@ -1069,7 +1069,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value11', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_german', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
@@ -1080,4 +1080,6 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    # track NaN
+    torch.autograd.set_detect_anomaly(True)
     train_pldm(args)

@@ -511,7 +511,7 @@ def parse_args():
     
     # Model path and output directory
     parser.add_argument('--model_path', type=str, default='output_same_page_value11/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value11_best', help='Directory to save test results')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value11_best3', help='Directory to save test results')
     
     # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
@@ -529,9 +529,9 @@ def parse_args():
     parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
-    parser.add_argument('--temperature', type=float, default=0.9, help='Temperature for discrete softmax')
+    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
-    parser.add_argument('--next_goal_temp', type=float, default=10.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
+    parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
     parser.add_argument('--base_reward', type=float, default=64.0, help='Base reward for each step')
     parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
     
