@@ -945,7 +945,7 @@ def parse_args():
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
-    parser.add_argument('--lambda_entropy', type=float, default=5e-5, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
+    parser.add_argument('--lambda_entropy', type=float, default=0.0, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
     parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e-5, help='Learning rate for dynamics model')

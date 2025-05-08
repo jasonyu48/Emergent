@@ -14,6 +14,26 @@ from pldm_envs.wall.wall import DotWall
 from pldm.qmodel import PLDMModel
 
 
+def check_for_nan(tensor, name="tensor", raise_error=True):
+    """Check if a tensor contains any NaN values and raise an exception if found.
+    
+    Args:
+        tensor: The tensor to check
+        name: Name of the tensor for error reporting
+        raise_error: If True, raise an exception when NaN is found
+        
+    Returns:
+        The input tensor
+    """
+    if isinstance(tensor, torch.Tensor) and torch.isnan(tensor).any():
+        message = f"NaN detected in {name}"
+        if raise_error:
+            raise ValueError(message)
+        else:
+            print(f"WARNING: {message}")
+    return tensor
+
+
 def make_gif(frames, filename, fps=10):
     """
     Convert a list of frames into a GIF and save it to a file.
@@ -140,6 +160,9 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width,
     # Calculate Euclidean distance
     distance = torch.norm(dot_position - target_position, dim=-1)
     
+    # Check for NaN in distance
+    check_for_nan(distance, "distance calculation")
+    
     # Determine if dot and target are in the same room
     half_width = wall_width // 2
     left_wall_x = wall_x - half_width
@@ -154,7 +177,8 @@ def calculate_distance_reward(dot_position, target_position, wall_x, wall_width,
     distance_reward = -distance  # Negative distance as reward
     same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
     
-    return distance_reward + same_room_bonus + base_reward
+    result = distance_reward + same_room_bonus + base_reward
+    return check_for_nan(result, "reward calculation")
 
 
 def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, use_quadrant=True, base_reward=64.0):
@@ -181,11 +205,19 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
         if obs_tensor.shape[0] != 1:
             obs_tensor = obs_tensor[:1]
             
+        # Check for NaN in observation
+        check_for_nan(obs_tensor, "observation tensor")
+        
         z_t = model.encode(obs_tensor)
+        
+        # Check for NaN in encoding
+        z_t = check_for_nan(z_t, "initial state encoding")
         
         # Decode reconstruction and store
         with torch.no_grad():
             recon_img = model.decode(z_t).squeeze(0).cpu()
+            # Check for NaN in reconstruction
+            recon_img = check_for_nan(recon_img, "initial reconstruction")
         reconstructions.append(recon_img)
     
     # Rollout loop
@@ -200,6 +232,11 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
         # Predict next goal
         with torch.no_grad():
             z_next, log_prob = model.predict_next_goal(z_t)
+            
+            # Check for NaN in next goal prediction
+            z_next = check_for_nan(z_next, f"next goal at step {step}")
+            log_prob = check_for_nan(log_prob, f"log probability at step {step}")
+            
             next_goals.append(z_next.cpu().numpy())
         
         # Search for action
@@ -212,6 +249,9 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
                 verbose=(step == 0),  # Verbose only on first step
                 use_quadrant=use_quadrant  # Use quadrant-based sampling if specified
             )
+            
+            # Check for NaN in action
+            a_t = check_for_nan(a_t, f"action at step {step}")
         
         # Take action in environment
         action = a_t.cpu().numpy()[0]
@@ -221,6 +261,10 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
         # Create tensor versions of dot and target positions for the reward calculation
         dot_position = env.dot_position.unsqueeze(0)  # Add batch dimension
         target_position = env.target_position.unsqueeze(0)  # Add batch dimension
+        
+        # Check for NaN in positions
+        check_for_nan(dot_position, f"dot position at step {step}")
+        check_for_nan(target_position, f"target position at step {step}")
         
         # Calculate reward using the distance-based function
         custom_reward = calculate_distance_reward(
@@ -251,11 +295,19 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
             if obs_tensor.shape[0] != 1:
                 obs_tensor = obs_tensor[:1]
             
+            # Check for NaN in observation
+            check_for_nan(obs_tensor, f"observation tensor at step {step}")
+            
             z_t = model.encode(obs_tensor)
+            
+            # Check for NaN in encoding
+            z_t = check_for_nan(z_t, f"state encoding at step {step}")
             
             # Decode reconstruction for this new state
             with torch.no_grad():
                 recon_img = model.decode(z_t).squeeze(0).cpu()
+                # Check for NaN in reconstruction
+                recon_img = check_for_nan(recon_img, f"reconstruction at step {step}")
             reconstructions.append(recon_img)
     
     # Calculate final distance
@@ -275,6 +327,34 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
         'final_distance': final_distance,
         'same_room': same_room
     }
+
+
+class NanDetector:
+    """Context manager to detect NaNs in model outputs during forward passes"""
+    def __init__(self, model, verbose=True):
+        self.model = model
+        self.hooks = []
+        self.verbose = verbose
+        
+    def __enter__(self):
+        def hook(module, input, output):
+            if isinstance(output, torch.Tensor) and torch.isnan(output).any():
+                module_name = module.__class__.__name__
+                raise ValueError(f"NaN detected in output of {module_name}")
+            return output
+        
+        for name, module in self.model.named_modules():
+            self.hooks.append(module.register_forward_hook(hook))
+        
+        if self.verbose:
+            print("NaN detection enabled for all model modules")
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for hook in self.hooks:
+            hook.remove()
+        if self.verbose:
+            print("NaN detection disabled")
 
 
 def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5, max_steps=50, num_samples=100, max_step_norm=15, encoder_embedding=200, encoding_dim=32, hidden_dim=409, use_quadrant=True, temperature=1.0, encoder_type='cnn', next_goal_temp=None, base_reward=64.0, search_mode='pldm'):
@@ -325,75 +405,85 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
     print("Using parallel action search with", num_samples, "samples per step")
     print(f"Action sampling strategy: {'quadrant-based' if use_quadrant else 'full action space'}")
     
-    # Evaluate model for multiple episodes
-    success_count = 0
-    total_rewards = []
-    
-    for episode in range(num_episodes):
-        print(f"\nEpisode {episode+1}/{num_episodes}")
+    # Enable NaN detection globally for the model
+    with NanDetector(model):
+        # Evaluate model for multiple episodes
+        success_count = 0
+        total_rewards = []
         
-        # Run the episode using our rollout function
-        result = rollout_episode(
-            model=model,
-            env=env,
-            max_steps=max_steps,
-            num_samples=num_samples,
-            device=device,
-            max_step_norm=max_step_norm,
-            use_quadrant=use_quadrant,
-            base_reward=base_reward
-        )
-        
-        # Extract data from result
-        states = result['states']
-        actions = result['actions']
-        dot_positions = result['dot_positions']
-        rewards = result['rewards']
-        next_goals = result['next_goals']
-        reconstructions = result['reconstructions']
-        done = result['done']
-        episode_reward = result['total_reward']
-        final_distance = result['final_distance']
-        same_room = result['same_room']
-        
-        # Count success
-        if done:
-            success_count += 1
-        
-        # Track rewards
-        total_rewards.append(episode_reward)
-        
-        # Create visualization frames for states and goals
-        states_tensor = []
-        for s in states:
-            if isinstance(s, torch.Tensor):
-                states_tensor.append(s.float())
-            else:
-                states_tensor.append(torch.from_numpy(s).float())
+        for episode in range(num_episodes):
+            print(f"\nEpisode {episode+1}/{num_episodes}")
             
-        # For visualization - create empty goal tensors (same shape as state)
-        if len(states_tensor) > 0:
-            goal_states = [torch.zeros_like(states_tensor[0]) for _ in range(len(states_tensor)-1)]
-        
-        # Visualize trajectory
-        target_position = env.target_position.cpu().numpy()
-        
-        visualize_trajectory(
-            states_tensor,
-            reconstructions,
-            dot_positions,
-            target_position,
-            env.wall_x.cpu().numpy(),
-            output_dir / f"episode_{episode+1}.gif"
-        )
-        
-        # Print episode summary
-        print(f"\nEpisode {episode+1} summary:")
-        print(f"  Length: {result['length']} steps")
-        print(f"  Success: {done}")
-        print(f"  Final distance to target: {final_distance:.4f}")
-        print(f"  Reward total: {episode_reward:.2f}")
-        print(f"  In same room as target: {same_room}")
+            try:
+                # Run the episode using our rollout function
+                result = rollout_episode(
+                    model=model,
+                    env=env,
+                    max_steps=max_steps,
+                    num_samples=num_samples,
+                    device=device,
+                    max_step_norm=max_step_norm,
+                    use_quadrant=use_quadrant,
+                    base_reward=base_reward
+                )
+                
+                # Extract data from result
+                states = result['states']
+                actions = result['actions']
+                dot_positions = result['dot_positions']
+                rewards = result['rewards']
+                next_goals = result['next_goals']
+                reconstructions = result['reconstructions']
+                done = result['done']
+                episode_reward = result['total_reward']
+                final_distance = result['final_distance']
+                same_room = result['same_room']
+                
+                # Count success
+                if done:
+                    success_count += 1
+                
+                # Track rewards
+                total_rewards.append(episode_reward)
+                
+                # Create visualization frames for states and goals
+                states_tensor = []
+                for s in states:
+                    if isinstance(s, torch.Tensor):
+                        states_tensor.append(s.float())
+                    else:
+                        states_tensor.append(torch.from_numpy(s).float())
+                    
+                # For visualization - create empty goal tensors (same shape as state)
+                if len(states_tensor) > 0:
+                    goal_states = [torch.zeros_like(states_tensor[0]) for _ in range(len(states_tensor)-1)]
+                
+                # Visualize trajectory
+                target_position = env.target_position.cpu().numpy()
+                
+                visualize_trajectory(
+                    states_tensor,
+                    reconstructions,
+                    dot_positions,
+                    target_position,
+                    env.wall_x.cpu().numpy(),
+                    output_dir / f"episode_{episode+1}.gif"
+                )
+                
+                # Print episode summary
+                print(f"\nEpisode {episode+1} summary:")
+                print(f"  Length: {result['length']} steps")
+                print(f"  Success: {done}")
+                print(f"  Final distance to target: {final_distance:.4f}")
+                print(f"  Reward total: {episode_reward:.2f}")
+                print(f"  In same room as target: {same_room}")
+                
+            except ValueError as e:
+                if "NaN detected" in str(e):
+                    print(f"Episode {episode+1} failed with error: {e}")
+                    print("Skipping to next episode...")
+                else:
+                    raise
     
     # Report overall performance
     if len(total_rewards) > 0:
@@ -414,8 +504,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
     # Model path and output directory
-    parser.add_argument('--model_path', type=str, default='output_same_page_value8/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_same_page_value11/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value11_best2', help='Directory to save test results')
     
     # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
@@ -442,6 +532,7 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
+    
     evaluate_model(
         model_path=args.model_path,
         output_dir=args.output_dir,
