@@ -510,8 +510,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
     # Model path and output directory
-    parser.add_argument('--model_path', type=str, default='output_same_page_value6/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value6', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_same_page_value9/best_model.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value9', help='Directory to save test results')
     
     # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 

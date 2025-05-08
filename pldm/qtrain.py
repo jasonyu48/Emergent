@@ -872,15 +872,10 @@ def train_pldm(args):
 
                     # Next-state / same-page optional losses
                     next_state_loss = torch.tensor(0.0, device=device)
-                    if args.use_same_page_loss:
-                        # Use KL divergence between policy-proposed goal and encoder latent distribution
-                        pseudo_next_goal, _ = model.next_goal_predictor(Z_t)
-                        on_the_same_page_loss = F.kl_div((pseudo_next_goal + eps).log(), Z_t.detach(), reduction='batchmean')
-                    else:
-                        on_the_same_page_loss = torch.tensor(0.0, device=device)
+                    on_the_same_page_loss = torch.tensor(0.0, device=device)
 
                     # Advantage / policy loss
-                    advantage = batch_returns_tensor - V_pred  # V_pred detached above
+                    advantage = (batch_returns_tensor - V_pred).detach()  # V_pred detached above
                     norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
                     policy_loss = -(log_probs * norm_advantage).mean()
 
@@ -892,7 +887,6 @@ def train_pldm(args):
                         args.lambda_policy * policy_loss
                         + args.lambda_dynamics * dynamics_loss
                         + args.lambda_value * value_loss
-                        + next_state_loss
                         + args.lambda_same_page * on_the_same_page_loss
                     )
 
@@ -907,9 +901,6 @@ def train_pldm(args):
                     loss_contributions['value'] = args.lambda_value * value_loss
                 else:
                     loss_contributions['value'] = None
-
-                # No clip contribution in discrete setting
-                loss_contributions['clip'] = None
 
                 if args.use_next_state_loss:
                     loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
@@ -1064,14 +1055,12 @@ def parse_args():
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
-    parser.add_argument('--lambda_clip', type=float, default=0.0, help='Weight for clip loss') #was 1e-1. we don't use it now.
-    parser.add_argument('--lambda_policy_clip', type=float, default=0.0, help='Weight for clip loss specifically on policy network') #1e0
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-1, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-1, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-1, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-1, help='Learning rate for value')
+    parser.add_argument('--encoder_lr', type=float, default=1e-3, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-3, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=1e-2, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
     # Precision parameters
@@ -1080,7 +1069,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value9', help='Directory to save model and logs')
     parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
