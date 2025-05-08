@@ -510,8 +510,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
     
     # Model path and output directory
-    parser.add_argument('--model_path', type=str, default='output_same_page_value9/best_model.pt', help='Path to trained model')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value9', help='Directory to save test results')
+    parser.add_argument('--model_path', type=str, default='output_same_page_value10/checkpoint.pt', help='Path to trained model')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value10_last', help='Directory to save test results')
     
     # Device and evaluation parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
@@ -533,7 +533,7 @@ def parse_args():
     parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     parser.add_argument('--next_goal_temp', type=float, default=10.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
     parser.add_argument('--base_reward', type=float, default=64.0, help='Base reward for each step')
-    parser.add_argument('--search_mode', type=str, default='pldm', choices=['pldm','rl'], help='Action search mode: pldm or rl')
+    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
     
     return parser.parse_args()
 
