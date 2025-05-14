@@ -8,6 +8,7 @@ import random
 
 from pldm_envs.wall.data.wall_utils import check_wall_intersect
 
+
 InfoType = Dict[str, Any]
 ObsType = torch.Tensor
 
@@ -49,6 +50,7 @@ class DotWall(gym.Env):
         self.n_steps = n_steps
         self.action_step_mean = action_step_mean
         self.rng = rng or np.random.default_rng()
+        self.max_step_norm = max_step_norm     # 训练脚本会用到的动作幅度上限
 
         self.action_space = gym.spaces.Box(
             low=-max_step_norm, high=max_step_norm, shape=(2,), dtype=np.float32
@@ -72,6 +74,7 @@ class DotWall(gym.Env):
         return obs
 
     def reset(self, location=None) -> Tuple[ObsType, InfoType]:
+        self.collided_last_step = False  
         self.wall_x, self.hole_y = self._generate_wall()
         self.left_wall_x = self.wall_x - self.wall_width // 2
         self.right_wall_x = self.wall_x + self.wall_width // 2
@@ -94,6 +97,7 @@ class DotWall(gym.Env):
             "dot_position": self.dot_position,
             "target_position": self.target_position,
             "target_obs": self.get_target_obs(),
+            "collided":        self.collided_last_step,
         }
 
     def _get_obs(self):
@@ -102,12 +106,26 @@ class DotWall(gym.Env):
     def get_target_obs(self):
         return self._render_dot_and_wall_target(self.target_position)
 
+    # def step(self, action: np.array) -> Tuple[ObsType, float, bool, bool, InfoType]:
+        # action = torch.tensor(action, device=self.device)
+        # self.dot_position = self._calculate_next_position(action)
     def step(self, action: np.array) -> Tuple[ObsType, float, bool, bool, InfoType]:
-        action = torch.tensor(action, device=self.device)
+        action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+
+        # 1) 把 NaN 变 0；把 ±Inf 钳到边界；再 clip 到合法区间
+        action = torch.nan_to_num(
+            action,
+            nan=0.0,
+            posinf=self.max_step_norm,
+            neginf=-self.max_step_norm,
+        )
+        action.clamp_(-self.max_step_norm, self.max_step_norm)
+
         self.dot_position = self._calculate_next_position(action)
         self.position_history.append(self.dot_position)
         obs = self._render_dot_and_wall()
-        done = (self.dot_position - self.target_position).pow(2).mean() < 1.0
+        #done = (self.dot_position - self.target_position).pow(2).mean() < 1.0
+        done = torch.norm(self.dot_position - self.target_position) < 1.0
         truncated = len(self.position_history) >= self.n_steps
         if obs.max() > 1.0:
             obs = obs / 255.0
@@ -125,8 +143,15 @@ class DotWall(gym.Env):
             border_wall_loc=self.border_wall_loc,
             img_size=self.img_size,
         )
+        # 1）先记录
+        self.collided_last_step = intersect is not None 
         if intersect is not None:
             next_dot_position = intersect_w_noise
+
+        # 统一把坐标里的 NaN/Inf 干掉并 clamp 到图像范围
+        next_dot_position = _sanitize_pos(
+        next_dot_position, self.img_size - 1, self.img_size - 1
+        )
         return next_dot_position
 
     def _generate_transition(self, location, action):
@@ -191,6 +216,11 @@ class DotWall(gym.Env):
 
             self.dot_position = torch.stack([start_x, start_y])
             self.target_position = torch.stack([target_x, target_y])
+            # --- 新增：最后再保底消毒一次 -------------------------
+            self.dot_position    = _sanitize_pos(self.dot_position,
+                                             self.img_size - 1, self.img_size - 1)
+            self.target_position = _sanitize_pos(self.target_position,
+                                             self.img_size - 1, self.img_size - 1)
         else:
             raise NotImplementedError
             effective_range = (self.img_size - 1) - 2 * self.padding
@@ -298,3 +328,17 @@ class DotWall(gym.Env):
         if obs_output.max() > 1.0:
             obs_output = obs_output / 255.0
         return obs_output
+    
+    
+    
+# ----------  NEW: helper to remove NaN / Inf & clip  ----------
+def _sanitize_pos(pos: torch.Tensor, max_x: float, max_y: float):
+    """
+    1) 把 NaN 统一变 0；把 ±Inf 钳到边界；
+    2) 最后再 clamp 到合法范围，确保坐标永远是有限数。
+    """
+    pos = torch.nan_to_num(pos, nan=0.0, posinf=max_x, neginf=0.0)
+    pos[..., 0].clamp_(0.0, max_x)
+    pos[..., 1].clamp_(0.0, max_y)
+    return pos
+# --------------------------------------------------------------

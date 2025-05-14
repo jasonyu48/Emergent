@@ -16,6 +16,7 @@ import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import numpy as np
 
 try:
     import multiprocessing
@@ -26,29 +27,26 @@ except Exception:
 from pldm_envs.wall.wall import DotWall
 from pldm.qmodel import PLDMModel
 
+# ----------  NEW: helper to remove NaN / Inf & clip  ----------
+def _sanitize_pos(pos: torch.Tensor, max_x: float, max_y: float):
+    """
+    1) 把 NaN 统一变 0；把 ±Inf 钳到边界；
+    2) 最后再 clamp 到合法范围，确保坐标永远是有限数。
+    """
+    pos = torch.nan_to_num(pos, nan=0.0, posinf=max_x, neginf=0.0)
+    pos[..., 0].clamp_(0.0, max_x)
+    pos[..., 1].clamp_(0.0, max_y)
+    return pos
+# --------------------------------------------------------------
 
-def calculate_distance_reward(dot_position, target_position, wall_x, wall_width):
-    """Calculate reward based on distance and whether dot and target are in same room"""
-    
-    # Calculate Euclidean distance
-    distance = torch.norm(dot_position - target_position, dim=-1)
-    
-    # Determine if dot and target are in the same room
-    half_width = wall_width // 2
-    left_wall_x = wall_x - half_width
-    right_wall_x = wall_x + half_width
-    
-    dot_in_left_room = dot_position[:, 0] < left_wall_x
-    target_in_left_room = target_position[:, 0] < left_wall_x
-    
-    same_room = (dot_in_left_room == target_in_left_room)
-    
-    # Calculate reward
-    distance_reward = -distance  # Negative distance as reward
-    same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
-    
-    return distance_reward + same_room_bonus + args.base_reward
-
+#---------restrict_action 函数：这个函数会检查小球的当前位置和墙壁的位置，并根据当前方向限制动作。
+def restrict_action(action, env, direction='right'):
+    # 限制小球不能超出左墙和右墙的边界
+    if direction == 'right' and env.dot_position[0] > env.right_wall_x - 1.0:
+        action = torch.tensor([-1.0, 0.0])  # 限制不能向右
+    elif direction == 'left' and env.dot_position[0] < env.left_wall_x + 1.0:
+        action = torch.tensor([1.0, 0.0])   # 限制不能向左
+    return action
 
 def compute_returns(rewards, gamma=0.99):
     """Compute discounted returns efficiently using vectorised tensor ops.
@@ -86,262 +84,139 @@ def compute_returns(rewards, gamma=0.99):
     return returns
 
 
-def rollout(model, env, max_steps=100, device='cpu', num_samples=100, use_quadrant=True):
-    """Perform a single rollout in the environment using the PLDM model"""
-    # Reset environment
+def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: int = 100, use_quadrant: bool = True):
+    """
+    两阶段 shaping 奖励：
+      A) 未穿门：      逼近门中心
+      B) 已在同房间：  逼近目标 + 方向奖励
+    外加：穿门一次性 + 命中一次性 + 步罚 + 反抖动 + 撞墙罚
+    """
+    # ---------- 常量超参 ----------
+    BONUS_CROSS_DOOR  = 100.0  # 增大穿门奖励
+    BONUS_HIT_TARGET  = 200.0  # 增大命中奖励
+    STEP_PENALTY      = 0.05   # 增大步数惩罚
+    WALL_PENALTY      = 2.0    # 增大撞墙惩罚
+    TINY_MOVE_THRESH  = 0.3
+    TINY_MOVE_PENALTY = 1.0    # 增大小动作惩罚
+    DIR_REWARD_LAMBDA = 2.0    # 增大方向奖励权重
+    TARGET_SCALE      = 10.0   # 增大目标接近奖励
+
+    # ---------- 0. 环境初始化 ----------
     obs, info = env.reset()
-    
-    # Initialize lists to store trajectory information
-    states = [obs]
-    actions = []
-    rewards = []
-    log_probs = []
-    next_goals = []
-    
-    # Ensure model is in evaluation mode during rollout
+
+    # 门中心（Tensor，跟随 env.device）
+    door_center = torch.stack([env.wall_x, env.hole_y]).to(env.device, dtype=torch.float32)
+
+    states, actions, rewards = [obs], [], []
+    log_probs, next_goals = [], []
+
+    # 初始化潜势
+    prev_dist_to_door    = torch.norm(env.dot_position - door_center).item()
+    prev_in_left = env.dot_position[0] < env.left_wall_x   # 记录在哪边
+    prev_dist_to_target  = torch.norm(env.dot_position - env.target_position).item()
+
+    # ---------- 1. 编码初始观测 ----------
     model.eval()
-    
-    # Get initial encoding
     with torch.no_grad():
-        # Convert observation to tensor properly
-        if isinstance(obs, torch.Tensor):
-            obs_tensor = obs.to(device=device)
-        else:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device)
-        obs_tensor = obs_tensor.unsqueeze(0)
-        
-        # Encode current observation
+        obs_tensor = (obs if isinstance(obs, torch.Tensor)
+                      else torch.tensor(obs, dtype=torch.float32,
+                                         device=device)).unsqueeze(0)
         z_t = model.encode(obs_tensor)
-        
-    # Rollout loop
-    done = False
-    truncated = False
-    
+
+    done = truncated = False
+    crossed_door = False            # 标记是否已经拿过穿门奖励
+
     for step in range(max_steps):
         if done or truncated:
             break
-        
-        
-        # Predict next goal
+
+        # ---------- 2. 预测下一 latent-goal ----------
         with torch.no_grad():
             z_next, log_prob = model.predict_next_goal(z_t)
             next_goals.append(z_next.squeeze(0).cpu())
             log_probs.append(log_prob.item())
-        
-        # Action search needs z_t and z_next to be detached
-        z_t_detached = z_t.clone().detach()
-        z_next_detached = z_next.clone().detach()
-        
-        # Search for action using detached tensors
+
+        # ---------- 3. 搜索动作 ----------
         a_t = model.search_action(
-            z_t_detached, 
-            z_next_detached, 
+            z_t.detach(), z_next.detach(),
             num_samples=num_samples,
             use_quadrant=use_quadrant
         )
-
-        # Take action in environment
         action = a_t.cpu().numpy()[0]
-        obs, reward, done, truncated, info = env.step(action)
 
-        # ----------------------------------------------------------------------------------
-        # Use distance‑based custom reward (same definition as in the test script) instead
-        # of the environment‑supplied reward so that train‑time and test‑time signals match.
-        # ----------------------------------------------------------------------------------
-        dot_position = env.dot_position.unsqueeze(0)
-        target_position = env.target_position.unsqueeze(0)
-        custom_reward = calculate_distance_reward(
-            dot_position,
-            target_position,
-            env.wall_x,
-            env.wall_width,
-        ).item()
+        # ---------- 4. 与环境交互 ----------
+        obs, _, done, truncated, info = env.step(action)
 
-        # Store information
+        # ---------- 5. 奖励计算 ----------
+        # 房间判断
+        dot_left     = env.dot_position[0] < env.left_wall_x
+        target_left  = env.target_position[0] < env.left_wall_x
+        same_room    = bool(dot_left == target_left)
+
+        # ---- 阶段 A：未穿门 ----
+        if not same_room:
+            curr_dist_to_door = torch.norm(env.dot_position - door_center).item()
+            step_reward = (prev_dist_to_door - curr_dist_to_door) * 2.0      # ×2 放大
+            prev_dist_to_door = curr_dist_to_door
+
+            # 检测“刚刚跨过墙”
+            crossed = (prev_in_left != (env.dot_position[0] < env.left_wall_x))
+            if crossed and not crossed_door:
+                step_reward += BONUS_CROSS_DOOR
+                crossed_door = True
+
+        # ---- 阶段 B：已在同房间 ----
+        else:
+            curr_dist_to_target = torch.norm(env.dot_position - env.target_position).item()
+            step_reward = TARGET_SCALE * (prev_dist_to_target - curr_dist_to_target)
+            
+            # 增加在正确房间的持续奖励
+            step_reward += 5.0
+            
+            # 方向奖励使用指数函数增强近距离精确性
+            v_a = action / (np.linalg.norm(action) + 1e-6)
+            v_t = (env.target_position.cpu().numpy() - env.dot_position.cpu().numpy())
+            dist_to_target = np.linalg.norm(v_t)
+            v_t = v_t / (dist_to_target + 1e-6)
+            direction_reward = DIR_REWARD_LAMBDA * np.exp(-0.1 * dist_to_target) * np.dot(v_a, v_t)
+            step_reward += direction_reward
+            
+            # 命中奖励使用平滑函数
+            hit_reward = BONUS_HIT_TARGET * np.exp(-curr_dist_to_target)
+            step_reward += hit_reward if curr_dist_to_target < 3.0 else 0
+            
+            prev_dist_to_target = curr_dist_to_target
+            prev_in_left = env.dot_position[0] < env.left_wall_x
+
+        # ---- 通用惩罚 ----
+        step_reward -= STEP_PENALTY  # 每步都扣
+        if np.linalg.norm(action) < TINY_MOVE_THRESH:
+            step_reward -= TINY_MOVE_PENALTY
+        if env.position_history and torch.all(env.position_history[-1] == env.dot_position):
+            step_reward -= WALL_PENALTY
+
+        # ---------- 存储 ----------
         states.append(obs)
         actions.append(action)
-        rewards.append(custom_reward)
-        
-        # Update current encoding
+        rewards.append(step_reward)
+
+        # ---------- 编码下一观测 ----------
         with torch.no_grad():
-            # Convert observation to tensor
-            if isinstance(obs, torch.Tensor):
-                obs_tensor = obs.to(device=device)
-            else:
-                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device)
-            obs_tensor = obs_tensor.unsqueeze(0)
-            
-            # Encode next observation
+            obs_tensor = (obs if isinstance(obs, torch.Tensor)
+                          else torch.tensor(obs, dtype=torch.float32,
+                                             device=device)).unsqueeze(0)
             z_t = model.encode(obs_tensor)
-    
-    # Set model back to training mode
+
+    # ---------- 8. 清理 ----------
     model.train()
-            
     return {
-        'states': states,
-        'actions': actions,
-        'rewards': rewards,
-        'log_probs': log_probs,
-        'next_goals': next_goals,
-        'done': done
+        "states":   states,
+        "actions":  actions,
+        "rewards":  rewards,
+        "log_probs": log_probs,
+        "next_goals": next_goals,
+        "done":     done
     }
-
-
-def calculate_custom_reward(states, env):
-    """Calculate rewards based on distances rather than environment rewards"""
-    rewards = []
-    
-    for i in range(len(states) - 1):
-        # Handle case where states might already be tensors
-        if isinstance(states[i], torch.Tensor):
-            s_t = states[i].float().unsqueeze(0)
-        else:
-            s_t = torch.from_numpy(states[i]).float().unsqueeze(0)
-            
-        if isinstance(states[i+1], torch.Tensor):
-            s_next = states[i+1].float().unsqueeze(0)
-        else:
-            s_next = torch.from_numpy(states[i+1]).float().unsqueeze(0)
-        
-        # Extract dot and target positions from states
-        dot_position = env.dot_position.unsqueeze(0)
-        target_position = env.target_position.unsqueeze(0)
-        
-        # Move tensors to the same device if needed
-        device = dot_position.device
-        if s_t.device != device:
-            s_t = s_t.to(device)
-        if s_next.device != device:
-            s_next = s_next.to(device)
-        
-        # Calculate distance-based reward
-        reward = calculate_distance_reward(
-            dot_position, 
-            target_position, 
-            env.wall_x,
-            env.wall_width
-        )
-        
-        rewards.append(reward.item())
-    
-    return rewards
-
-
-class ParallelEpisodeCollector:
-    """Collect episodes in parallel for faster training"""
-    
-    def __init__(self, model, env_creator, max_steps, device, 
-                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, num_samples=100, use_quadrant=True):
-        """
-        Initialize parallel episode collector
-        
-        Args:
-            model: The PLDM model
-            env_creator: Function that creates a new environment instance
-            max_steps: Maximum steps per episode
-            device: Device to run computation on
-            num_workers: Number of parallel workers
-            prefetch_queue_size: Size of the prefetch queue for episodes
-            use_gpu_for_inference: Whether to use GPU for inference during rollout
-            num_samples: Number of action samples to evaluate in parallel
-            use_quadrant: Whether to use quadrant-based action sampling
-        """
-        self.model = model
-        self.env_creator = env_creator
-        self.max_steps = max_steps
-        self.device = device
-        self.num_workers = num_workers
-        self.use_gpu_for_inference = use_gpu_for_inference
-        self.num_samples = num_samples
-        self.use_quadrant = use_quadrant
-        
-        # Create worker environments
-        self.envs = [env_creator() for _ in range(num_workers)]
-        
-        # Create episode queue
-        self.episode_queue = queue.Queue(maxsize=prefetch_queue_size)
-        
-        # Create thread pool
-        self.executor = ThreadPoolExecutor(max_workers=num_workers)
-        
-        # Flag to stop workers
-        self.stop_flag = threading.Event()
-        
-        # Lock for GPU access if using GPU for inference
-        self.gpu_lock = threading.Lock() if use_gpu_for_inference else None
-        
-        # Start workers
-        self.futures = []
-        for worker_id in range(num_workers):
-            future = self.executor.submit(self._worker_loop, worker_id)
-            self.futures.append(future)
-            
-    def _worker_loop(self, worker_id):
-        """Worker thread loop to collect episodes"""
-        env = self.envs[worker_id]
-        
-        while not self.stop_flag.is_set():
-            try:
-                # Try to collect an episode
-                if self.use_gpu_for_inference:
-                    # Use GPU with lock to prevent race conditions
-                    with self.gpu_lock:
-                        trajectory = rollout(
-                            self.model,  # Use the shared GPU model
-                            env,
-                            max_steps=self.max_steps,
-                            device=self.device,  # Use GPU for inference
-                            num_samples=self.num_samples,
-                            use_quadrant=self.use_quadrant
-                        )
-                else:
-                    # Create a CPU copy for inference (original behavior)
-                    local_model = copy.deepcopy(self.model).to('cpu')
-                    local_model.eval()
-                    trajectory = rollout(
-                        local_model,
-                        env,
-                        max_steps=self.max_steps,
-                        device='cpu',  # Use CPU for inference
-                        num_samples=self.num_samples,
-                        use_quadrant=self.use_quadrant
-                    )
-                
-                # Skip empty trajectories
-                if len(trajectory['states']) <= 1 or len(trajectory['log_probs']) == 0:
-                    continue
-                    
-                # Put episode in queue
-                try:
-                    self.episode_queue.put(trajectory, block=True, timeout=None)
-                except queue.Full:
-                    # If queue is full, skip this episode
-                    pass
-                    
-            except Exception as e:
-                print(f"Error in worker {worker_id}: {str(e)}")
-                import traceback
-                traceback.print_exc()
-    
-    def get_batch(self, batch_size):
-        """Get a batch of episodes from the queue"""
-        batch = []
-        for _ in range(batch_size):
-            try:
-                episode = self.episode_queue.get(block=True, timeout=5.0)
-                self.episode_queue.task_done()
-                batch.append(episode)
-            except queue.Empty:
-                # If queue is empty after timeout, return whatever we have
-                break
-        return batch
-    
-    def stop(self):
-        """Stop all worker threads"""
-        self.stop_flag.set()
-        for future in self.futures:
-            future.cancel()
-        self.executor.shutdown(wait=False)
 
 # -----------------------------------------------------------------------------
 # Utility: log gradient/update statistics
@@ -421,6 +296,9 @@ def _log_encoder_grad_sources(params, loss_dict, step_idx=0, prefix="EncGradSour
     for name, loss in loss_dict.items():
         if loss is None or loss.requires_grad == False:
             continue
+        # autograd.grad 只能接受标量；若不是标量先取均值
+        if loss.dim() != 0:
+            loss = loss.mean()
         # Compute grads w.r.t params WITHOUT accumulating into .grad
         grads = torch.autograd.grad(
             loss,
@@ -469,6 +347,115 @@ def save_experiment_info(args, output_dir, epoch, best_reward):
         # Print them sorted by key for consistency
         for key in sorted(arg_dict.keys()):
             f.write(f"  --{key}: {arg_dict[key]}\n")
+
+class ParallelEpisodeCollector:
+    """Collect episodes in parallel for faster training"""
+    
+    def __init__(self, model, env_creator, max_steps, device, 
+                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, 
+                 num_samples=100, use_quadrant=True):
+        self.model = model
+        self.env_creator = env_creator
+        self.max_steps = max_steps
+        self.device = device
+        self.num_workers = num_workers
+        self.use_gpu_for_inference = use_gpu_for_inference
+        self.num_samples = num_samples
+        self.use_quadrant = use_quadrant
+        self.prefetch_queue_size = prefetch_queue_size
+        
+        # Create worker environments
+        self.envs = [env_creator() for _ in range(num_workers)]
+        
+        # Create episode queue
+        self.episode_queue = queue.Queue(maxsize=prefetch_queue_size)
+        
+        # Create thread pool
+        self.executor = ThreadPoolExecutor(max_workers=num_workers)
+        
+        # Flag to stop workers
+        self.stop_flag = threading.Event()
+        
+        # Lock for GPU access if using GPU for inference
+        self.gpu_lock = threading.Lock() if use_gpu_for_inference else None
+        
+        # Start workers
+        self.futures = []
+        for worker_id in range(num_workers):
+            future = self.executor.submit(self._worker_loop, worker_id)
+            self.futures.append(future)
+            
+    def _worker_loop(self, worker_id):
+        """Worker thread loop to collect episodes"""
+        env = self.envs[worker_id]
+        
+        while not self.stop_flag.is_set():
+            try:
+                # Try to collect an episode
+                if self.use_gpu_for_inference:
+                    with self.gpu_lock:  # Use GPU with lock
+                        trajectory = rollout(
+                            self.model,
+                            env,
+                            max_steps=self.max_steps,
+                            device=self.device,
+                            num_samples=self.num_samples,
+                            use_quadrant=self.use_quadrant
+                        )
+                else:
+                    # Create CPU copy for inference
+                    local_model = copy.deepcopy(self.model).to('cpu')
+                    local_model.eval()
+                    trajectory = rollout(
+                        local_model,
+                        env,
+                        max_steps=self.max_steps,
+                        device='cpu',
+                        num_samples=self.num_samples,
+                        use_quadrant=self.use_quadrant
+                    )
+                
+                # Skip empty trajectories
+                if len(trajectory['states']) <= 1 or len(trajectory['log_probs']) == 0:
+                    continue
+                    
+                # Put episode in queue
+                try:
+                    self.episode_queue.put(trajectory, block=True, timeout=5.0)
+                except queue.Full:
+                    continue
+                    
+            except Exception as e:
+                print(f"Error in worker {worker_id}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
+    
+    def get_batch(self, batch_size):
+        """Get a batch of episodes from the queue with improved timeout handling"""
+        batch = []
+        max_retries = 10
+        retry_count = 0
+        
+        while len(batch) < batch_size and retry_count < max_retries:
+            try:
+                episode = self.episode_queue.get(block=True, timeout=5.0)
+                self.episode_queue.task_done()
+                batch.append(episode)
+            except queue.Empty:
+                print(f"Warning: Queue timeout, retry {retry_count + 1}/{max_retries}")
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print("Max retries reached, returning partial batch")
+                    break
+        return batch
+    
+    def stop(self):
+        """Stop all worker threads"""
+        self.stop_flag.set()
+        for future in self.futures:
+            future.cancel()
+        self.executor.shutdown(wait=False)
 
 def train_pldm(args):
     """Main training function for PLDM model"""
@@ -590,14 +577,15 @@ def train_pldm(args):
             f"({total_steps_per_round}). Please choose compatible values."
         )
 
-    # Create parallel episode collector
+    # Create parallel episode collector with explicit parameters
     collector = ParallelEpisodeCollector(
-        model=model, 
+        model=model,
         env_creator=create_env,
         max_steps=args.max_steps_per_episode,
         device=device,
         num_workers=num_workers,
-        use_gpu_for_inference=args.use_gpu_inference,  # Use GPU for inference since we have a powerful A100
+        prefetch_queue_size=8,  # 显式设置队列大小
+        use_gpu_for_inference=args.use_gpu_inference,
         num_samples=args.num_samples,
         use_quadrant=args.use_quadrant
     )
@@ -701,6 +689,10 @@ def train_pldm(args):
                     mean_R = batch_returns_tensor.mean()
                     std_R  = batch_returns_tensor.std(unbiased=False).clamp(min=1e-4)
                     batch_returns_tensor = (batch_returns_tensor - mean_R) / std_R
+                batch_returns_tensor = torch.nan_to_num(
+                    batch_returns_tensor,
+                    nan=0.0, posinf=0.0, neginf=0.0
+                )
 
                 # --------------------------------------------------------
                 # Vectorised computation over the whole batch
@@ -730,15 +722,24 @@ def train_pldm(args):
                 log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
                 # Value prediction
-                V_pred = model.next_goal_predictor.value(Z_t.detach())
+                V_pred = model.next_goal_predictor.value(Z_t) #grad flow from value head
+                V_pred = torch.clamp(V_pred, -20.0, 20.0)        # 限定数值范围
+                V_pred = torch.nan_to_num(
+                    V_pred,
+                    nan=0.0, posinf=20.0, neginf=-20.0
+                )
+                if not torch.isfinite(V_pred).all():
+                    print(f"[WARN step={global_step}] NaN/Inf detected in V_pred — auto-fix to 0")
+                    V_pred = torch.nan_to_num(V_pred, nan=0.0, posinf=0.0, neginf=0.0)
+                    value_loss = F.smooth_l1_loss(V_pred_safe, batch_returns_tensor)
 
                 # Dynamics prediction
-                Z_next_pred = model.dynamics(Z_t.detach(),A_t)
-
+                #Z_next_pred = model.dynamics(Z_t.detach(),A_t) # Control the grad flow of the world model
+                Z_next_pred = model.dynamics(Z_t,A_t) 
                 # ---------------- losses ----------------
                 # KL divergence between predicted and target probability distributions
                 eps = 1e-8
-                dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual.detach(), reduction='batchmean')
+                dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual)  #grad flow from the world model
 
                 # ------------------------------------------------------------------
                 #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
@@ -772,10 +773,16 @@ def train_pldm(args):
                 else:
                     norm_advantage = advantage
 
-                policy_loss = -(log_probs * norm_advantage)
+                policy_loss = -(log_probs * norm_advantage).mean()
 
                 # Value loss
                 value_loss = F.smooth_l1_loss(V_pred, batch_returns_tensor)
+                    # ---- 新增 4 行 ----
+                if torch.isnan(value_loss):
+                    print(f"[WARN step={global_step}] NaN in value_loss — 重新计算")
+                     # 强制把 V_pred 再次钳位后重算
+                    V_pred_safe = torch.clamp(torch.nan_to_num(V_pred), -20.0, 20.0)
+                    value_loss = F.smooth_l1_loss(V_pred_safe, batch_returns_tensor)
 
                 if args.lambda_entropy > 0:
                     # Entropy bonus for exploration, compute manually for numerical stability
@@ -823,7 +830,7 @@ def train_pldm(args):
                 loss.backward()
                 # First, clip gradients on the value head a bit harder — it is
                 # the most common source of exploding weights.
-                torch.nn.utils.clip_grad_norm_(model.next_goal_predictor.value_mlp.parameters(), max_norm=0.3)
+                torch.nn.utils.clip_grad_norm_(model.next_goal_predictor.value_mlp.parameters(), max_norm=0.1)
 
                 # Then clip the entire model to a reasonable global norm.
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -917,7 +924,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state (default 512 for discrete codes)')
+    parser.add_argument('--encoding_dim', type=int, default=64, help='Dimension of encoded state (default 512 for discrete codes)')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
     parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
@@ -929,8 +936,8 @@ def parse_args():
     parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
-    parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
-    parser.add_argument('--num_workers', type=int, default=1, help='Number of parallel workers for episode collection')
+    parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm')
+    parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
     parser.add_argument('--log_steps', type=int, default=32, help='Logging frequency for gradient statistics')
     parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
@@ -941,26 +948,26 @@ def parse_args():
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1e-3, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e0, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
-    parser.add_argument('--lambda_entropy', type=float, default=0.0, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
+    parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-5, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-6, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-5, help='Learning rate for value')
+    parser.add_argument('--encoder_lr', type=float, default=3e-6, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-4, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=3e-6, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=3e-5, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value8', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value51310', help='Directory to save model and logs')
     parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
-    parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
+    #parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
     parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
 
     return parser.parse_args()

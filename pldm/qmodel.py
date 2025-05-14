@@ -5,7 +5,9 @@ from torch.distributions import Normal, Categorical
 from pathlib import Path
 import math
 
-NUM_CODES = 512  # size of the discrete latent vocabulary
+NUM_CODES = 64  # size of the discrete latent vocabulary
+
+NUM_ACTIONS = 32  # number of actions in the environment
 
 class ViTEncoder(nn.Module):
     """Vision Transformer Encoder for DotWall environment"""
@@ -111,7 +113,9 @@ class ViTEncoder(nn.Module):
         cls_embedding = x[:, 0]
         
         logits = self.projection(cls_embedding)          # [B, 512]
-        probs  = F.softmax(logits / self.temperature, dim=-1)
+        #probs  = F.softmax(logits / self.temperature, dim=-1)
+        #cancel the probability distribution
+        probs  = logits
         return probs
 
 # Add a CNN-based encoder alternative
@@ -221,7 +225,9 @@ class DynamicsModel(nn.Module):
             x = layer_norm(x + residual)
         
         logits = self.output_proj(x)           # [B, 512]
-        probs  = F.softmax(logits / self.temperature, dim=-1)
+        #probs  = F.softmax(logits / self.temperature, dim=-1) 
+        #cancel the probability distribution
+        probs  = logits
         return probs
 
 
@@ -252,7 +258,7 @@ class NextGoalPredictor(nn.Module):
             self.residual_blocks.append(block)
         
         # Policy-specific sub-network output projection
-        self.output_proj = nn.Linear(hidden_dim, NUM_CODES)
+        self.output_proj = nn.Linear(hidden_dim, NUM_ACTIONS)
 
         # ------------------------------------------------------------------
         #  Independent value network (no parameter sharing with policy MLP)
@@ -289,7 +295,7 @@ class NextGoalPredictor(nn.Module):
         # logits = logits - logits.max(dim=-1, keepdim=True)[0]
         dist = Categorical(logits=logits / self.temperature)
         idx  = dist.sample()                      # [B]
-        z_next = F.one_hot(idx, num_classes=NUM_CODES).float()
+        z_next = F.one_hot(idx, num_classes=NUM_ACTIONS).float()
         log_prob = dist.log_prob(idx)             # [B]
         return z_next, log_prob
     
@@ -405,7 +411,7 @@ class PLDMModel(nn.Module):
         # Precompute RL grid actions once
         if self.search_mode == 'rl':
             # build a sqrt(n) x sqrt(n) grid spanning [-max_step_norm, max_step_norm]
-            n = encoding_dim
+            n = NUM_ACTIONS
             grid_size = int(math.ceil(math.sqrt(n)))
             coords = torch.linspace(-self.max_step_norm, self.max_step_norm, steps=grid_size)
             xg, yg = torch.meshgrid(coords, coords, indexing='xy')

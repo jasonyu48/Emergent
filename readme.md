@@ -1,35 +1,83 @@
-# Overview
-This is a repository for the paper ["Learning from Reward-Free Offline Data: A Case for Planning with Latent Dynamics Models"](https://arxiv.org/abs/2502.14819).
+# Planning with Latent Dynamics Model (PLDM)
 
-[[Website]](https://latent-planning.github.io/) [[Paper]](https://arxiv.org/abs/2502.14819)
+This project implements a PLDM model for the DotWall environment, using a Joint Embedding Predictive Architecture (JEPA) approach.
 
-<img src="assets/main_idea.png" width="100%" style="max-width: 640px"><br/>
+## Architecture
 
-In this paper, we focus on methods that can learn from offline trajectories
-without reward annotations. We test methods ranging from RL to control, and
-find that planning with a learned latent dynamics model (PLDM) is a promising
-approach for this setting when the data is imperfect.
+- **Encoder**: Vision Transformer (ViT) that encodes observations into latent states
+- **Dynamics Model**: MLP that predicts the next latent state given the current state and action
+- **Next-Goal Predictor**: MLP that predicts the next goal state given the current latent state
 
-# Setting up
+## Requirements
 
-## Repo Setup
+Install dependencies:
 
-```
-git clone git@github.com:vladisai/PLDM.git
-
-cd PLDM
-
-pip install -r requirements.txt
-
-pip install -e .
+```bash
+pip install torch torchvision gymnasium numpy matplotlib tqdm tensorboard imageio
 ```
 
-## Run Experiments
+## Training
 
-1. Go to `pldm_envs/`, follow instructions to set up dataset for the environment of your hoice
-2. Go to `pldm/`, follow instruction to run training or evaluation
+To train the PLDM model:
 
-## Datasets
+```bash
+python -m pldm.train --epochs 50 --episodes_per_epoch 10 --output_dir results
+```
 
-To see the datasets we used to train our models, see folders inside `pldm_envs/`.
-The readmes there will guide you on how to download and set up the datasets.
+### Training Parameters
+
+- `--encoding_dim`: Dimension of encoded state (default: 128)
+- `--hidden_dim`: Dimension of hidden layers (default: 256)
+- `--epochs`: Number of training epochs (default: 50)
+- `--episodes_per_epoch`: Number of episodes per epoch (default: 10)
+- `--max_steps_per_episode`: Maximum steps per episode (default: 100)
+- `--search_steps`: Number of steps for action search (default: 10)
+- `--gamma`: Discount factor (default: 0.99)
+- `--lambda_dynamics`: Weight for dynamics loss (default: 1.0)
+- `--encoder_lr`: Learning rate for encoder (default: 1e-4)
+- `--dynamics_lr`: Learning rate for dynamics model (default: 1e-3)
+- `--policy_lr`: Learning rate for policy (default: 1e-3)
+- `--device`: Device to run training on (default: cuda if available, otherwise cpu)
+- `--output_dir`: Directory to save model and logs (default: output)
+
+## Evaluation
+
+To evaluate a trained model:
+
+```bash
+python -m pldm.test --model_path results/best_model.pt --output_dir test_results
+```
+
+### Evaluation Parameters
+
+- `--model_path`: Path to trained model (required)
+- `--output_dir`: Directory to save test results (default: test_output)
+- `--device`: Device to run on (default: cuda if available, otherwise cpu)
+- `--num_episodes`: Number of episodes to evaluate (default: 5)
+- `--max_steps`: Maximum steps per episode (default: 100)
+- `--search_steps`: Number of steps for action search (default: 10)
+
+## Method
+
+The training objective $\mathcal{J}(\theta, \phi, \psi)$ combines:
+
+1. Policy gradient objective for the next-goal predictor
+2. Mean squared error loss for the dynamics model (JEPA objective)
+
+$$\mathcal{J}(\theta, \phi, \psi) = \mathbb{E}_{\{\tau_i\}_{i=1...N}} \Bigg[ 
+\sum_{t=1}^T \log \pi_\theta(\hat{z}_t \mid E_\phi(s_{<t})) \cdot A_t - \lambda \sum_{t=1}^T\left\| W_\psi(E_\phi(s_{t-1}), a_{t-1}) - E_\phi(s_t) \right\|^2 
+\Bigg]$$
+
+where:
+- $\pi_\theta$ is the next-goal predictor
+- $E_\phi$ is the encoder
+- $W_\psi$ is the dynamics model
+- $A_t$ is the advantage
+- $\lambda$ is a hyperparameter controlling the weight of the two objectives
+
+## Environment
+
+The environment is DotWall, where:
+- An agent (dot) must navigate to a target position
+- A wall with a door divides the environment
+- The agent must find the door to reach the target on the other side 
