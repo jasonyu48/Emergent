@@ -1012,8 +1012,8 @@ def parse_args():
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=1e-4, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1.0, help='Weight for policy loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1.0, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_policy', type=float, default=1e-2, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
     parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability

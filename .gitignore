@@ -8,3 +8,5 @@ checkpoint/
 debug_output
 test_output*
 output*
+output2*
+comparison_plot.png

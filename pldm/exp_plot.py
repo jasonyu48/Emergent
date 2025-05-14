@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Constants
-NUM_TRIALS = 20
-OUTPUT_DIR = Path('output')
+NUM_TRIALS = 10
+OUTPUT_DIR = Path('output2')
 
 # Function to run qtrain.py with specified mode
 def run_qtrain(mode):
@@ -56,5 +56,5 @@ plt.ylabel('Average Reward')
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig('comparison_plot.png')
+plt.savefig(f"{OUTPUT_DIR}/comparison_plot.png")
 plt.show() 
