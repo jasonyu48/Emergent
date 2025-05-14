@@ -12,7 +12,7 @@ def run_qtrain(mode):
     for i in range(NUM_TRIALS):
         print(f"Running trial {i+1}/{NUM_TRIALS} for {mode} mode...")
         subprocess.run([
-            'python', 'qtrain.py',
+            'python', 'pldm/qtrain.py',
             '--mode', str(mode),
             '--output_dir', str(OUTPUT_DIR / f'{mode}_trial_{i+1}')
         ])
