@@ -1,31 +1,24 @@
 from typing import Optional
 import os
-import shutil
-from dataclasses import dataclass
-import dataclasses
 import random
 import time
 from omegaconf import MISSING
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-import torch.amp  # Add this import for mixed precision training
-import numpy as np
 from tqdm.auto import tqdm
 from matplotlib import pyplot as plt
 import matplotlib
-import gymnasium as gym
+import sys
+import logging
 import argparse
 from pathlib import Path
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import copy
-
-from pldm.logger import Logger, MetricTracker
+import numpy as np
 
 try:
     import multiprocessing
@@ -33,37 +26,29 @@ try:
 except Exception:
     pass
 
-from pldm.configs import ConfigBase
-from pldm.data.enums import DataConfig
-from pldm.data.utils import get_optional_fields
-import pldm.utils as utils
-
 from pldm_envs.wall.wall import DotWall
 from pldm.qmodel import PLDMModel
 
+# ----------  NEW: helper to remove NaN / Inf & clip  ----------
+def _sanitize_pos(pos: torch.Tensor, max_x: float, max_y: float):
+    """
+    1) 把 NaN 统一变 0；把 ±Inf 钳到边界；
+    2) 最后再 clamp 到合法范围，确保坐标永远是有限数。
+    """
+    pos = torch.nan_to_num(pos, nan=0.0, posinf=max_x, neginf=0.0)
+    pos[..., 0].clamp_(0.0, max_x)
+    pos[..., 1].clamp_(0.0, max_y)
+    return pos
+# --------------------------------------------------------------
 
-def calculate_distance_reward(dot_position, target_position, wall_x, wall_width):
-    """Calculate reward based on distance and whether dot and target are in same room"""
-    
-    # Calculate Euclidean distance
-    distance = torch.norm(dot_position - target_position, dim=-1)
-    
-    # Determine if dot and target are in the same room
-    half_width = wall_width // 2
-    left_wall_x = wall_x - half_width
-    right_wall_x = wall_x + half_width
-    
-    dot_in_left_room = dot_position[:, 0] < left_wall_x
-    target_in_left_room = target_position[:, 0] < left_wall_x
-    
-    same_room = (dot_in_left_room == target_in_left_room)
-    
-    # Calculate reward
-    distance_reward = -distance  # Negative distance as reward
-    same_room_bonus = torch.where(same_room, torch.tensor(20.0, device=dot_position.device), torch.tensor(0.0, device=dot_position.device))
-    
-    return distance_reward + same_room_bonus + args.base_reward
-
+#---------restrict_action 函数：这个函数会检查小球的当前位置和墙壁的位置，并根据当前方向限制动作。
+def restrict_action(action, env, direction='right'):
+    # 限制小球不能超出左墙和右墙的边界
+    if direction == 'right' and env.dot_position[0] > env.right_wall_x - 1.0:
+        action = torch.tensor([-1.0, 0.0])  # 限制不能向右
+    elif direction == 'left' and env.dot_position[0] < env.left_wall_x + 1.0:
+        action = torch.tensor([1.0, 0.0])   # 限制不能向左
+    return action
 
 def compute_returns(rewards, gamma=0.99):
     """Compute discounted returns efficiently using vectorised tensor ops.
@@ -101,324 +86,144 @@ def compute_returns(rewards, gamma=0.99):
     return returns
 
 
-def rollout(model, env, max_steps=100, device='cpu', bf16=False, num_samples=100, use_quadrant=True):
-    """Perform a single rollout in the environment using the PLDM model"""
-    # Reset environment
+def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: int = 100, use_quadrant: bool = True):
+    """
+    两阶段 shaping 奖励：
+      A) 未穿门：      逼近门中心
+      B) 已在同房间：  逼近目标 + 方向奖励
+    外加：穿门一次性 + 命中一次性 + 步罚 + 反抖动 + 撞墙罚
+    """
+    # ---------- 常量超参 ----------
+    BONUS_CROSS_DOOR  = 100.0  # 增大穿门奖励
+    BONUS_HIT_TARGET  = 2000.0  # 增大命中奖励
+    STEP_PENALTY      = 0.05   # 增大步数惩罚
+    WALL_PENALTY      = 2.0    # 增大撞墙惩罚
+    TINY_MOVE_THRESH  = 0.3
+    TINY_MOVE_PENALTY = 1.0    # 增大小动作惩罚
+    DIR_REWARD_LAMBDA = 2.0    # 增大方向奖励权重
+    TARGET_SCALE      = 10.0   # 增大目标接近奖励
+
+    # ---------- 0. 环境初始化 ----------
     obs, info = env.reset()
-    
-    # Initialize lists to store trajectory information
-    states = [obs]
-    actions = []
-    rewards = []
-    log_probs = []
-    next_goals = []
-    
-    # Ensure model is in evaluation mode during rollout
+
+    # 门中心（Tensor，跟随 env.device）
+    door_center = torch.stack([env.wall_x, env.hole_y]).to(env.device, dtype=torch.float32)
+
+    states, actions, rewards = [obs], [], []
+    log_probs, next_goals = [], []
+
+    # 初始化潜势
+    prev_dist_to_door    = torch.norm(env.dot_position - door_center).item()
+    prev_in_left = env.dot_position[0] < env.left_wall_x   # 记录在哪边
+    prev_dist_to_target  = torch.norm(env.dot_position - env.target_position).item()
+
+    # ---------- 1. 编码初始观测 ----------
     model.eval()
-    
-    # Get dtype based on bf16 setting
-    dtype = torch.bfloat16 if bf16 else torch.float32
-    
-    # Verify model is using the correct dtype
-    sample_param = next(model.parameters())
-    if sample_param.dtype != dtype:
-        print(f"Warning: Model dtype ({sample_param.dtype}) doesn't match requested dtype ({dtype})")
-        print("Converting model to the correct dtype")
-        model = model.to(dtype)
-        # Verify conversion was successful
-        sample_param = next(model.parameters())
-        print(f"Model parameters dtype after conversion: {sample_param.dtype}")
-        
-        # Double-check Conv2d bias which often causes issues
-        for module in model.encoder.modules():
-            if isinstance(module, nn.Conv2d) and module.bias is not None:
-                if module.bias.dtype != dtype:
-                    print(f"Warning: Conv2d bias still has dtype {module.bias.dtype}, forcing conversion to {dtype}")
-                    module.bias = nn.Parameter(module.bias.to(dtype))
-                else:
-                    print(f"Conv2d bias correctly has dtype {dtype}")
-                break
-    
-    # Get initial encoding
     with torch.no_grad():
-        # Convert observation to tensor properly
-        if isinstance(obs, torch.Tensor):
-            obs_tensor = obs.to(dtype=dtype, device=device)
-        else:
-            obs_tensor = torch.tensor(obs, dtype=dtype, device=device)
-        obs_tensor = obs_tensor.unsqueeze(0)
-        
-        # Encode current observation
-        try:
-            z_t = model.encode(obs_tensor)
-        except RuntimeError as e:
-            if "Input type" in str(e) and "bias type" in str(e):
-                print(f"BFloat16 conversion error: {e}")
-                print("Attempting to fix Conv2d bias dtype issue...")
-                
-                # Fix bias issue in specific conv layers
-                for module in model.encoder.modules():
-                    if isinstance(module, nn.Conv2d) and module.bias is not None:
-                        module.bias = nn.Parameter(module.bias.to(dtype))
-                
-                # Try encoding again
-                z_t = model.encode(obs_tensor)
-        
-    # Rollout loop
-    done = False
-    truncated = False
-    
+        obs_tensor = (obs if isinstance(obs, torch.Tensor)
+                      else torch.tensor(obs, dtype=torch.float32,
+                                         device=device)).unsqueeze(0)
+        z_t = model.encode(obs_tensor)
+
+    done = truncated = False
+    crossed_door = False            # 标记是否已经拿过穿门奖励
+
     for step in range(max_steps):
         if done or truncated:
             break
-        
-        
-        # Predict next goal
+
+        # ---------- 2. 预测下一 latent-goal ----------
         with torch.no_grad():
-            # Ensure z_t has correct dtype
-            if z_t.dtype != dtype:
-                z_t = z_t.to(dtype)
-                
             z_next, log_prob = model.predict_next_goal(z_t)
             next_goals.append(z_next.squeeze(0).cpu())
             log_probs.append(log_prob.item())
-        
-        # Action search needs z_t and z_next to be detached
-        z_t_detached = z_t.clone().detach()
-        z_next_detached = z_next.clone().detach()
-        
-        # Search for action using detached tensors
+
+        # ---------- 3. 搜索动作 ----------
         a_t = model.search_action(
-            z_t_detached.to(dtype), 
-            z_next_detached.to(dtype), 
+            z_t.detach(), z_next.detach(),
             num_samples=num_samples,
             use_quadrant=use_quadrant
         )
+        action = a_t.cpu().numpy()[0]
 
-        # Take action in environment
-        # Convert to float32 before converting to NumPy since NumPy doesn't support bfloat16
-        action = a_t.to(torch.float32).cpu().numpy()[0]
-        obs, reward, done, truncated, info = env.step(action)
+        # ---------- 4. 与环境交互 ----------
+        obs, _, done, truncated, info = env.step(action)
 
-        # ----------------------------------------------------------------------------------
-        # Use distance‑based custom reward (same definition as in the test script) instead
-        # of the environment‑supplied reward so that train‑time and test‑time signals match.
-        # ----------------------------------------------------------------------------------
-        dot_position = env.dot_position.unsqueeze(0)
-        target_position = env.target_position.unsqueeze(0)
-        custom_reward = calculate_distance_reward(
-            dot_position,
-            target_position,
-            env.wall_x,
-            env.wall_width,
-        ).item()
+        # ---------- 5. 奖励计算 ----------
+        # 房间判断
+        dot_left     = env.dot_position[0] < env.left_wall_x
+        target_left  = env.target_position[0] < env.left_wall_x
+        same_room    = bool(dot_left == target_left)
 
-        # Store information
+        # ---- 阶段 A：未穿门 ----
+        if not same_room:
+            curr_dist_to_door = torch.norm(env.dot_position - door_center).item()
+            step_reward = (prev_dist_to_door - curr_dist_to_door) * 2.0      # ×2 放大
+            prev_dist_to_door = curr_dist_to_door
+
+            # 检测"刚刚跨过墙"
+            crossed = (prev_in_left != (env.dot_position[0] < env.left_wall_x))
+            if crossed and not crossed_door:
+                step_reward += BONUS_CROSS_DOOR
+                crossed_door = True
+
+        # ---- 阶段 B：已在同房间 ----
+        else:
+            curr_dist_to_target = torch.norm(env.dot_position - env.target_position).item()
+            # 提前终止：如果距离目标非常近，给予大额奖励并终止 episode
+            if curr_dist_to_target < 2.5:
+                print(f"[DEBUG] HIT TARGET at step {step}")
+                step_reward += BONUS_HIT_TARGET
+                done = True
+            step_reward = TARGET_SCALE * (prev_dist_to_target - curr_dist_to_target)
+            
+            # 增加在正确房间的持续奖励
+            step_reward += 20.0 * np.exp(-curr_dist_to_target / 10)
+            
+            # 方向奖励使用指数函数增强近距离精确性
+            v_a = action / (np.linalg.norm(action) + 1e-6)
+            v_t = (env.target_position.cpu().numpy() - env.dot_position.cpu().numpy())
+            dist_to_target = np.linalg.norm(v_t)
+            v_t = v_t / (dist_to_target + 1e-6)
+            direction_reward = DIR_REWARD_LAMBDA * np.exp(-0.1 * dist_to_target) * np.dot(v_a, v_t)
+            step_reward += direction_reward
+            
+            # 命中奖励使用平滑函数
+            hit_reward = BONUS_HIT_TARGET * np.exp(-curr_dist_to_target)
+            step_reward += hit_reward if curr_dist_to_target < 3.0 else 0
+            
+            prev_dist_to_target = curr_dist_to_target
+            prev_in_left = env.dot_position[0] < env.left_wall_x
+
+        # ---- 通用惩罚 ----
+        step_reward -= STEP_PENALTY  # 每步都扣
+        if np.linalg.norm(action) < TINY_MOVE_THRESH:
+            step_reward -= TINY_MOVE_PENALTY
+        if env.position_history and torch.all(env.position_history[-1] == env.dot_position):
+            step_reward -= WALL_PENALTY
+
+        # ---------- 存储 ----------
         states.append(obs)
         actions.append(action)
-        rewards.append(custom_reward)
-        
-        # Update current encoding
+        rewards.append(step_reward)
+
+        # ---------- 编码下一观测 ----------
         with torch.no_grad():
-            # Convert observation to tensor
-            if isinstance(obs, torch.Tensor):
-                obs_tensor = obs.to(dtype=dtype, device=device)
-            else:
-                obs_tensor = torch.tensor(obs, dtype=dtype, device=device)
-            obs_tensor = obs_tensor.unsqueeze(0)
-            
-            # Encode next observation
+            obs_tensor = (obs if isinstance(obs, torch.Tensor)
+                          else torch.tensor(obs, dtype=torch.float32,
+                                             device=device)).unsqueeze(0)
             z_t = model.encode(obs_tensor)
-    
-    # Set model back to training mode
+
+    # ---------- 8. 清理 ----------
     model.train()
-            
     return {
-        'states': states,
-        'actions': actions,
-        'rewards': rewards,
-        'log_probs': log_probs,
-        'next_goals': next_goals,
-        'done': done
+        "states":   states,
+        "actions":  actions,
+        "rewards":  rewards,
+        "log_probs": log_probs,
+        "next_goals": next_goals,
+        "done":     done
     }
-
-
-def calculate_custom_reward(states, env):
-    """Calculate rewards based on distances rather than environment rewards"""
-    rewards = []
-    
-    for i in range(len(states) - 1):
-        # Handle case where states might already be tensors
-        if isinstance(states[i], torch.Tensor):
-            s_t = states[i].float().unsqueeze(0)
-        else:
-            s_t = torch.from_numpy(states[i]).float().unsqueeze(0)
-            
-        if isinstance(states[i+1], torch.Tensor):
-            s_next = states[i+1].float().unsqueeze(0)
-        else:
-            s_next = torch.from_numpy(states[i+1]).float().unsqueeze(0)
-        
-        # Extract dot and target positions from states
-        dot_position = env.dot_position.unsqueeze(0)
-        target_position = env.target_position.unsqueeze(0)
-        
-        # Move tensors to the same device if needed
-        device = dot_position.device
-        if s_t.device != device:
-            s_t = s_t.to(device)
-        if s_next.device != device:
-            s_next = s_next.to(device)
-        
-        # Calculate distance-based reward
-        reward = calculate_distance_reward(
-            dot_position, 
-            target_position, 
-            env.wall_x,
-            env.wall_width
-        )
-        
-        rewards.append(reward.item())
-    
-    return rewards
-
-
-class ParallelEpisodeCollector:
-    """Collect episodes in parallel for faster training"""
-    
-    def __init__(self, model, env_creator, max_steps, device, bf16_supported, 
-                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, num_samples=100, use_quadrant=True):
-        """
-        Initialize parallel episode collector
-        
-        Args:
-            model: The PLDM model
-            env_creator: Function that creates a new environment instance
-            max_steps: Maximum steps per episode
-            device: Device to run computation on
-            bf16_supported: Whether BF16 precision is supported
-            num_workers: Number of parallel workers
-            prefetch_queue_size: Size of the prefetch queue for episodes
-            use_gpu_for_inference: Whether to use GPU for inference during rollout
-            num_samples: Number of action samples to evaluate in parallel
-            use_quadrant: Whether to use quadrant-based action sampling
-        """
-        self.model = model
-        self.env_creator = env_creator
-        self.max_steps = max_steps
-        self.device = device
-        self.bf16_supported = bf16_supported
-        self.num_workers = num_workers
-        self.use_gpu_for_inference = use_gpu_for_inference
-        self.num_samples = num_samples
-        self.use_quadrant = use_quadrant
-        
-        # Create worker environments
-        self.envs = [env_creator() for _ in range(num_workers)]
-        
-        # Create episode queue
-        self.episode_queue = queue.Queue(maxsize=prefetch_queue_size)
-        
-        # Create thread pool
-        self.executor = ThreadPoolExecutor(max_workers=num_workers)
-        
-        # Flag to stop workers
-        self.stop_flag = threading.Event()
-        
-        # Lock for GPU access if using GPU for inference
-        self.gpu_lock = threading.Lock() if use_gpu_for_inference else None
-        
-        # Start workers
-        self.futures = []
-        for worker_id in range(num_workers):
-            future = self.executor.submit(self._worker_loop, worker_id)
-            self.futures.append(future)
-            
-    def _worker_loop(self, worker_id):
-        """Worker thread loop to collect episodes"""
-        env = self.envs[worker_id]
-        
-        while not self.stop_flag.is_set():
-            try:
-                # Try to collect an episode
-                if self.use_gpu_for_inference:
-                    # Use GPU with lock to prevent race conditions
-                    with self.gpu_lock:
-                        # Ensure model is properly converted to BFloat16 if needed
-                        if self.bf16_supported:
-                            # Verify model is in BFloat16 mode
-                            sample_param = next(self.model.parameters())
-                            if sample_param.dtype != torch.bfloat16:
-                                print(f"Converting worker {worker_id} model to BFloat16 (current dtype: {sample_param.dtype})")
-                                self.model = self.model.to(torch.bfloat16)
-                                # Verify conversion was successful
-                                sample_param = next(self.model.parameters())
-                                print(f"Worker {worker_id} model parameters dtype after conversion: {sample_param.dtype}")
-                                
-                                # Check a Conv2d bias specifically (they often cause issues)
-                                for module in self.model.encoder.modules():
-                                    if isinstance(module, nn.Conv2d) and module.bias is not None:
-                                        print(f"Worker {worker_id} Conv2d bias dtype: {module.bias.dtype}")
-                                        break
-                        
-                        trajectory = rollout(
-                            self.model,  # Use the shared GPU model
-                            env,
-                            max_steps=self.max_steps,
-                            device=self.device,  # Use GPU for inference
-                            bf16=self.bf16_supported,
-                            num_samples=self.num_samples,
-                            use_quadrant=self.use_quadrant
-                        )
-                else:
-                    # Create a CPU copy for inference (original behavior)
-                    local_model = copy.deepcopy(self.model).to('cpu')
-                    local_model.eval()
-                    trajectory = rollout(
-                        local_model,
-                        env,
-                        max_steps=self.max_steps,
-                        device='cpu',  # Use CPU for inference
-                        bf16=False,    # Use FP32 on CPU for stability
-                        num_samples=self.num_samples,
-                        use_quadrant=self.use_quadrant
-                    )
-                
-                # Skip empty trajectories
-                if len(trajectory['states']) <= 1 or len(trajectory['log_probs']) == 0:
-                    continue
-                    
-                # Put episode in queue
-                try:
-                    self.episode_queue.put(trajectory, block=True, timeout=5.0)
-                except queue.Full:
-                    # If queue is full, skip this episode
-                    pass
-                    
-            except Exception as e:
-                print(f"Error in worker {worker_id}: {str(e)}")
-                import traceback
-                traceback.print_exc()
-    
-    def get_batch(self, batch_size):
-        """Get a batch of episodes from the queue"""
-        batch = []
-        for _ in range(batch_size):
-            try:
-                episode = self.episode_queue.get(block=True, timeout=5.0)
-                self.episode_queue.task_done()
-                batch.append(episode)
-            except queue.Empty:
-                # If queue is empty after timeout, return whatever we have
-                break
-        return batch
-    
-    def stop(self):
-        """Stop all worker threads"""
-        self.stop_flag.set()
-        for future in self.futures:
-            future.cancel()
-        self.executor.shutdown(wait=False)
 
 # -----------------------------------------------------------------------------
 # Utility: log gradient/update statistics
@@ -496,16 +301,19 @@ def _log_encoder_grad_sources(params, loss_dict, step_idx=0, prefix="EncGradSour
     """
     stats = {}
     for name, loss in loss_dict.items():
-        if loss is None:
+        if loss is None or loss.requires_grad == False:
             continue
-        # Compute grads w.r.t encoder params WITHOUT accumulating into .grad
+        # autograd.grad 只能接受标量；若不是标量先取均值
+        if loss.dim() != 0:
+            loss = loss.mean()
+        # Compute grads w.r.t params WITHOUT accumulating into .grad
         grads = torch.autograd.grad(
             loss,
             params,
             retain_graph=True,
             allow_unused=True,
         )
-        # Compute mean absolute gradient across all encoder params
+        # Compute mean absolute gradient across all params
         abs_means = []
         for g in grads:
             if g is None:
@@ -547,42 +355,143 @@ def save_experiment_info(args, output_dir, epoch, best_reward):
         for key in sorted(arg_dict.keys()):
             f.write(f"  --{key}: {arg_dict[key]}\n")
 
+# -----------------------------------------------------------------
+# Helper: duplicate stdout/stderr to a log file so that every print
+#         during training is also saved under <output_dir>/train.log
+# -----------------------------------------------------------------
+class _Tee(object):
+    def __init__(self, file_path):
+        self.file = open(file_path, "a", buffering=1)  # line‑buffered
+        self.stdout = sys.stdout
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.file.write(data)
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+class ParallelEpisodeCollector:
+    """Collect episodes in parallel for faster training"""
+    
+    def __init__(self, model, env_creator, max_steps, device, 
+                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, 
+                 num_samples=100, use_quadrant=True):
+        self.model = model
+        self.env_creator = env_creator
+        self.max_steps = max_steps
+        self.device = device
+        self.num_workers = num_workers
+        self.use_gpu_for_inference = use_gpu_for_inference
+        self.num_samples = num_samples
+        self.use_quadrant = use_quadrant
+        self.prefetch_queue_size = prefetch_queue_size
+        
+        # Create worker environments
+        self.envs = [env_creator() for _ in range(num_workers)]
+        
+        # Create episode queue
+        self.episode_queue = queue.Queue(maxsize=prefetch_queue_size)
+        
+        # Create thread pool
+        self.executor = ThreadPoolExecutor(max_workers=num_workers)
+        
+        # Flag to stop workers
+        self.stop_flag = threading.Event()
+        
+        # Lock for GPU access if using GPU for inference
+        self.gpu_lock = threading.Lock() if use_gpu_for_inference else None
+        
+        # Start workers
+        self.futures = []
+        for worker_id in range(num_workers):
+            future = self.executor.submit(self._worker_loop, worker_id)
+            self.futures.append(future)
+            
+    def _worker_loop(self, worker_id):
+        """Worker thread loop to collect episodes"""
+        env = self.envs[worker_id]
+        
+        while not self.stop_flag.is_set():
+            try:
+                # Try to collect an episode
+                if self.use_gpu_for_inference:
+                    with self.gpu_lock:  # Use GPU with lock
+                        trajectory = rollout(
+                            self.model,
+                            env,
+                            max_steps=self.max_steps,
+                            device=self.device,
+                            num_samples=self.num_samples,
+                            use_quadrant=self.use_quadrant
+                        )
+                else:
+                    # Create CPU copy for inference
+                    local_model = copy.deepcopy(self.model).to('cpu')
+                    local_model.eval()
+                    trajectory = rollout(
+                        local_model,
+                        env,
+                        max_steps=self.max_steps,
+                        device='cpu',
+                        num_samples=self.num_samples,
+                        use_quadrant=self.use_quadrant
+                    )
+                
+                # Skip empty trajectories
+                if len(trajectory['states']) <= 1 or len(trajectory['log_probs']) == 0:
+                    continue
+                    
+                # Put episode in queue
+                try:
+                    self.episode_queue.put(trajectory, block=True, timeout=5.0)
+                except queue.Full:
+                    continue
+                    
+            except Exception as e:
+                print(f"Error in worker {worker_id}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
+    
+    def get_batch(self, batch_size):
+        """Get a batch of episodes from the queue with improved timeout handling"""
+        batch = []
+        max_retries = 10
+        retry_count = 0
+        
+        while len(batch) < batch_size and retry_count < max_retries:
+            try:
+                episode = self.episode_queue.get(block=True, timeout=5.0)
+                self.episode_queue.task_done()
+                batch.append(episode)
+            except queue.Empty:
+                print(f"Warning: Queue timeout, retry {retry_count + 1}/{max_retries}")
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print("Max retries reached, returning partial batch")
+                    break
+        return batch
+    
+    def stop(self):
+        """Stop all worker threads"""
+        self.stop_flag.set()
+        for future in self.futures:
+            future.cancel()
+        self.executor.shutdown(wait=False)
+
 def train_pldm(args):
     """Main training function for PLDM model"""
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
+    # Redirect console output to log file
+    sys.stdout = _Tee(output_dir / "train.log")
+    sys.stderr = sys.stdout  # duplicate stderr as well
     
     # Set up device
     device = torch.device(args.device)
-    
-    # Check if bf16 is supported on the current device
-    bf16_supported = (
-        args.bf16 and
-        torch.cuda.is_available() and
-        torch.cuda.is_bf16_supported()
-    )
-    
-    if args.bf16 and not bf16_supported:
-        print("Warning: BF16 precision requested but not supported on this device. Using FP32 instead.")
-    
-    # Set up mixed precision training
-    if torch.cuda.is_available():
-        if bf16_supported:
-            print("Using BFloat16 mixed precision training")
-            amp_dtype = torch.bfloat16
-            # Optional: enable autocast globally
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-        else:
-            print("Using FP32 training")
-            amp_dtype = None
-    else:
-        print("Mixed precision not available, using FP32")
-        amp_dtype = None
-    
-    # Create scaler for mixed precision training
-    scaler = torch.amp.GradScaler('cuda', enabled=amp_dtype is not None and amp_dtype == torch.float16)
     
     # Environment creation function for parallel workers
     def create_env():
@@ -608,10 +517,6 @@ def train_pldm(args):
     
     # Print model parameter counts
     model.print_parameter_count()
-    
-    # Convert model to mixed precision if supported
-    if amp_dtype is not None:
-        print(f"Model will use {amp_dtype} precision during forward pass")
     
     # ---------------------------------------------------------------
     # Separate parameter groups: encoder, dynamics, policy-net, value-net, decoder
@@ -672,10 +577,6 @@ def train_pldm(args):
         if 'optimizer_state_dict' in checkpoint:
             # New single optimizer format
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            
-            # If using FP16, load scaler state
-            if 'scaler_state_dict' in checkpoint and amp_dtype == torch.float16:
-                scaler.load_state_dict(checkpoint['scaler_state_dict'])
                 
         start_epoch = checkpoint.get('epoch', 0) + 1
         global_step = checkpoint.get('global_step', 0)
@@ -685,6 +586,7 @@ def train_pldm(args):
     
     # Create tensorboard writer
     writer = SummaryWriter(log_dir=str(output_dir / 'logs'))
+    epoch_rewards_history = []  # store avg reward for each epoch
     
     # Determine number of data loader workers based on CPU cores
     num_workers = min(args.num_workers if hasattr(args, 'num_workers') else 4, max(1, (multiprocessing.cpu_count() - 1) // 2))
@@ -703,15 +605,15 @@ def train_pldm(args):
             f"({total_steps_per_round}). Please choose compatible values."
         )
 
-    # Create parallel episode collector
+    # Create parallel episode collector with explicit parameters
     collector = ParallelEpisodeCollector(
-        model=model, 
+        model=model,
         env_creator=create_env,
         max_steps=args.max_steps_per_episode,
         device=device,
-        bf16_supported=bf16_supported,
         num_workers=num_workers,
-        use_gpu_for_inference=args.use_gpu_inference,  # Use GPU for inference since we have a powerful A100
+        prefetch_queue_size=8,  # 显式设置队列大小
+        use_gpu_for_inference=args.use_gpu_inference,
         num_samples=args.num_samples,
         use_quadrant=args.use_quadrant
     )
@@ -723,15 +625,8 @@ def train_pldm(args):
             total_reward = 0
             total_policy_loss = 0
             total_dynamics_loss = 0
-            total_next_state_loss = 0
             total_on_the_same_page_loss = 0
-            total_reconstruction_loss = 0
-            total_variance_loss = 0
             total_value_loss = 0
-            total_clip_loss = 0
-            total_clip_z_t = 0
-            total_clip_z_next_pred = 0
-            total_clip_pseudo_goal = 0
             num_episodes = 0
 
             # Adjust learning rates for this epoch
@@ -810,100 +705,145 @@ def train_pldm(args):
                 # ------------------------------------------------------------
                 # 3) Compute losses on the sampled batch
                 # ------------------------------------------------------------
+                # ------------------------------------------------------------------
+                # (NEW) Return normalisation for a more stable value-function target.
+                # This rescales *R_t* to zero-mean, unit-std on every minibatch which
+                # reduces the dynamic range of the value-head gradients and makes
+                # NaN explosions far less likely.
+                # ------------------------------------------------------------------
                 batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
 
-                with torch.amp.autocast('cuda', enabled=amp_dtype is not None, dtype=amp_dtype):
-                    # --------------------------------------------------------
-                    # Vectorised computation over the whole batch
-                    # --------------------------------------------------------
+                if args.normalize_returns_and_advantage:
+                    mean_R = batch_returns_tensor.mean()
+                    std_R  = batch_returns_tensor.std(unbiased=False).clamp(min=1e-4)
+                    batch_returns_tensor = (batch_returns_tensor - mean_R) / std_R
+                batch_returns_tensor = torch.nan_to_num(
+                    batch_returns_tensor,
+                    nan=0.0, posinf=0.0, neginf=0.0
+                )
 
-                    # Stack tensors
-                    S_t = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
-                                      for s in batch_states]).float().detach()
-                    S_next = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
-                                         for s in batch_next_states]).float().detach()
-                    A_t = torch.stack(batch_actions).to(device).float().detach()
-                    NG_store = torch.stack(batch_next_goals).to(device).float().detach()
+                # --------------------------------------------------------
+                # Vectorised computation over the whole batch
+                # --------------------------------------------------------
 
-                    # Encode in one shot
-                    Z_t = model.encode(S_t)
+                # Stack tensors
+                S_t = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
+                                  for s in batch_states]).float().detach()
+                S_next = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
+                                     for s in batch_next_states]).float().detach()
+                A_t = torch.stack(batch_actions).to(device).float().detach()
+                NG_store = torch.stack(batch_next_goals).to(device).float().detach()
 
-                    if global_step % args.log_steps == 0 and args.heatmap:
-                        # save a heatmap of Z_t, make the heat map larger
-                        plt.figure(figsize=(10, 10))
-                        plt.imshow(Z_t.cpu().detach().numpy())
-                        plt.savefig(f"{args.output_dir}/heatmap_{global_step}.png")
-                        plt.close()
+                # Encode in one shot
+                Z_t = model.encode(S_t)
 
-                    Z_next_actual = model.encode(S_next)
+                if global_step % args.log_steps == 0 and args.heatmap:
+                    # save a heatmap of Z_t, make the heat map larger
+                    plt.figure(figsize=(10, 10))
+                    plt.imshow(Z_t.cpu().detach().numpy())
+                    plt.savefig(f"{args.output_dir}/heatmap_{global_step}.png")
+                    plt.close()
 
-                    # Policy log-prob (no grad through stored goal)
-                    log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
+                Z_next_actual = model.encode(S_next)
 
-                    # Value prediction
-                    V_pred = model.next_goal_predictor.value(Z_t)
+                # Policy log-prob (no grad through stored goal)
+                log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
 
-                    # Dynamics prediction
-                    Z_next_pred = model.dynamics(Z_t,A_t)
+                # Value prediction
+                V_pred = model.next_goal_predictor.value(Z_t) #grad flow from value head
+                V_pred = torch.clamp(V_pred, -20.0, 20.0)        # 限定数值范围
+                V_pred = torch.nan_to_num(
+                    V_pred,
+                    nan=0.0, posinf=20.0, neginf=-20.0
+                )
+                if not torch.isfinite(V_pred).all():
+                    print(f"[WARN step={global_step}] NaN/Inf detected in V_pred — auto-fix to 0")
+                    V_pred = torch.nan_to_num(V_pred, nan=0.0, posinf=0.0, neginf=0.0)
+                    value_loss = F.smooth_l1_loss(V_pred_safe, batch_returns_tensor)
 
-                    # ---------------- losses ----------------
-                    # KL divergence between predicted and target probability distributions
-                    eps = 1e-10
-                    dynamics_loss = F.kl_div((Z_next_pred + eps).log(), Z_next_actual, reduction='batchmean')
+                # Dynamics prediction
+                if args.mode == 'RL':
+                    Z_next_pred = model.dynamics(Z_t.detach(),A_t) # Control the grad flow of the world model
+                else:
+                    Z_next_pred = model.dynamics(Z_t,A_t) 
+                # ---------------- losses ----------------
+                # KL divergence between predicted and target probability distributions
+                eps = 1e-8
+                if args.mode == 'RL':
+                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
+                else:
+                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual)  #grad flow from the world model
 
-                    # ------------------------------------------------------------------
-                    #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
-                    # ------------------------------------------------------------------
-                    avg_mag_z_t         = Z_t.norm(dim=-1).mean().item()
-                    avg_mag_z_next_pred = Z_next_pred.norm(dim=-1).mean().item()
-                    avg_mag_ng_store    = NG_store.norm(dim=-1).mean().item()
+                # ------------------------------------------------------------------
+                #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
+                # ------------------------------------------------------------------
+                avg_mag_z_t         = Z_t.norm(dim=-1).mean().item()
+                avg_mag_z_next_pred = Z_next_pred.norm(dim=-1).mean().item()
+                avg_mag_ng_store    = NG_store.norm(dim=-1).mean().item()
 
-                    if global_step % args.log_steps == 0:
-                        tqdm.write(
-                             f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
-                        )
+                if global_step % args.log_steps == 0:
+                    tqdm.write(
+                         f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
+                    )
 
-                        # Count distinct discrete codes in this batch
-                        z_codes = Z_t.argmax(dim=1)
-                        ng_codes = NG_store.argmax(dim=1)
-                        num_z_codes = int(torch.unique(z_codes).numel())
-                        num_ng_codes = int(torch.unique(ng_codes).numel())
-                        tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
+                    # Count distinct discrete codes in this batch
+                    z_codes = Z_t.argmax(dim=1)
+                    ng_codes = NG_store.argmax(dim=1)
+                    num_z_codes = int(torch.unique(z_codes).numel())
+                    num_ng_codes = int(torch.unique(ng_codes).numel())
+                    tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
 
-                    # Next-state / same-page optional losses
-                    next_state_loss = torch.tensor(0.0, device=device)
+                if args.use_same_page_loss:
+                    on_the_same_page_loss = torch.tensor(0.0, device=device)
+                    print("on_the_same_page_loss is not implemented")
+                else:
                     on_the_same_page_loss = torch.tensor(0.0, device=device)
 
-                    # Advantage / policy loss
-                    advantage = (batch_returns_tensor - V_pred).detach()  # V_pred detached above
-                    # norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
-                    policy_loss = -(log_probs * advantage).mean()
+                # Advantage / policy loss – use the (possibly) normalised returns
+                advantage = (batch_returns_tensor - V_pred).detach()
+                if args.normalize_returns_and_advantage:
+                    norm_advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + eps)
+                else:
+                    norm_advantage = advantage
 
-                    # Value loss
-                    value_loss = F.mse_loss(V_pred, batch_returns_tensor)
+                policy_loss = -(log_probs * norm_advantage).mean()
 
-                    # Total loss
-                    loss = (
-                        args.lambda_policy * policy_loss
-                        + args.lambda_dynamics * dynamics_loss
-                        + args.lambda_value * value_loss
-                        + args.lambda_same_page * on_the_same_page_loss
-                    )
+                # Value loss
+                value_loss = F.smooth_l1_loss(V_pred, batch_returns_tensor)
+                    # ---- 新增 4 行 ----
+                if torch.isnan(value_loss):
+                    print(f"[WARN step={global_step}] NaN in value_loss — 重新计算")
+                     # 强制把 V_pred 再次钳位后重算
+                    V_pred_safe = torch.clamp(torch.nan_to_num(V_pred), -20.0, 20.0)
+                    value_loss = F.smooth_l1_loss(V_pred_safe, batch_returns_tensor)
+
+                if args.lambda_entropy > 0:
+                    # Entropy bonus for exploration, compute manually for numerical stability
+                    dist = model.next_goal_predictor.get_numerical_stable_distribution(Z_t)
+                    entropy = - (dist * (dist + eps).log()).sum(dim=-1).mean()
+                    writer.add_scalar('Stats/entropy', entropy.item(), global_step)
+                else:
+                    entropy = torch.tensor(0.0, device=device)
+
+                # Total loss including entropy bonus
+                loss = (
+                    args.lambda_policy * policy_loss
+                    + args.lambda_dynamics * dynamics_loss
+                    + args.lambda_value * value_loss
+                    + args.lambda_same_page * on_the_same_page_loss
+                    - args.lambda_entropy * entropy
+                )
 
                 # Log encoder grad sources
                 encoder_params_list = [p for p in model.encoder.parameters() if p.requires_grad]
                 loss_contributions = {
                     'policy': args.lambda_policy * policy_loss,
                     'dynamics': args.lambda_dynamics * dynamics_loss,
+                    'entropy': - args.lambda_entropy * entropy,
                 }
                 # Value loss contribution (optional)
                 if args.use_value_loss and args.lambda_value > 0:
                     loss_contributions['value'] = args.lambda_value * value_loss
-                else:
-                    loss_contributions['value'] = None
-
-                if args.use_next_state_loss:
-                    loss_contributions['next_state'] = args.lambda_dynamics * next_state_loss
                 if args.use_same_page_loss:
                     loss_contributions['same_page'] = args.lambda_same_page * on_the_same_page_loss
 
@@ -920,13 +860,14 @@ def train_pldm(args):
                     _log_encoder_grad_sources(dynamics_params_list, loss_contributions, global_step, prefix="DynamicsGradSources")
 
                 # Optimizer step
-                if amp_dtype == torch.float16:
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    optimizer.step()
+                loss.backward()
+                # First, clip gradients on the value head a bit harder — it is
+                # the most common source of exploding weights.
+                torch.nn.utils.clip_grad_norm_(model.next_goal_predictor.value_mlp.parameters(), max_norm=0.1)
+
+                # Then clip the entire model to a reasonable global norm.
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
                 if global_step % args.log_steps == 0:
                     _log_grad_update_stats(model, optimizer, global_step)
                 optimizer.zero_grad()
@@ -934,8 +875,6 @@ def train_pldm(args):
                 # Logging
                 writer.add_scalar('Loss/policy', policy_loss.item(), global_step)
                 writer.add_scalar('Loss/dynamics', dynamics_loss.item(), global_step)
-                if args.use_next_state_loss:
-                    writer.add_scalar('Loss/next_state', next_state_loss.item(), global_step)
                 if args.use_same_page_loss:
                     writer.add_scalar('Loss/on_the_same_page', on_the_same_page_loss.item(), global_step)
                 if args.use_value_loss:
@@ -948,8 +887,6 @@ def train_pldm(args):
                 # ---------------- aggregate epoch-level stats -----------------
                 total_policy_loss += policy_loss.item()
                 total_dynamics_loss += dynamics_loss.item()
-                if args.use_next_state_loss:
-                    total_next_state_loss += next_state_loss.item()
                 if args.use_same_page_loss:
                     total_on_the_same_page_loss += on_the_same_page_loss.item()
                 if args.use_value_loss:
@@ -975,10 +912,6 @@ def train_pldm(args):
                          f"Avg Dynamics Loss: {avg_dynamics_loss:.4f}"
                 
                 # Add conditional metrics to report
-                if args.use_next_state_loss:
-                    avg_next_state_loss = total_next_state_loss / num_episodes
-                    report += f", Avg Next State Loss: {avg_next_state_loss:.4f}"
-                
                 if args.use_same_page_loss:
                     avg_on_the_same_page_loss = total_on_the_same_page_loss / num_episodes
                     report += f", Avg On-Same-Page Loss: {avg_on_the_same_page_loss:.4f}"
@@ -988,6 +921,7 @@ def train_pldm(args):
                     report += f", Avg Value Loss: {avg_value_loss:.4f}"
                 
                 print(report)
+                epoch_rewards_history.append(avg_reward)
                 
                 # Save best model
                 if avg_reward > best_reward:
@@ -1004,16 +938,42 @@ def train_pldm(args):
                 'best_reward': best_reward,
                 'global_step': global_step
             }
-            
-            # Add scaler state dict if using FP16
-            if amp_dtype == torch.float16:
-                checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
                 
             torch.save(checkpoint_dict, output_dir / 'checkpoint.pt')
             
             # Save experiment information to text file
             save_experiment_info(args, output_dir, epoch, best_reward)
+            
+            # Save Avg‑Reward vs Epoch curve after each epoch
+            if epoch_rewards_history:
+                plt.figure(figsize=(6,4))
+                plt.plot(epoch_rewards_history, marker='o')
+                plt.title("Average Reward vs Epoch")
+                plt.xlabel("Epoch")
+                plt.ylabel("Avg Reward")
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(output_dir / f"avg_reward_curve.png")
+                plt.close()
+
+            # Save epoch_rewards_history to a file after each epoch
+            with open(output_dir / "epoch_rewards_history.txt", "w") as f:
+                for reward in epoch_rewards_history:
+                    f.write(f"{reward}\n")
         
+        # -------------------------------------------------------------
+        # Plot Avg‑Reward vs Epoch curve and save as PNG
+        # -------------------------------------------------------------
+        if epoch_rewards_history:
+            plt.figure(figsize=(6,4))
+            plt.plot(epoch_rewards_history, marker='o')
+            plt.title("Average Reward vs Epoch")
+            plt.xlabel("Epoch")
+            plt.ylabel("Avg Reward")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(output_dir / "avg_reward_curve_final.png")
+            plt.close()
         writer.close()
         
     finally:
@@ -1028,58 +988,57 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=512, help='Dimension of encoded state (default 512 for discrete codes)')
+    parser.add_argument('--encoding_dim', type=int, default=64, help='Dimension of encoded state (default 512 for discrete codes)')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
-    parser.add_argument('--encoder_type', type=str, default='vit', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
+    parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=500, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
-    parser.add_argument('--batch_size', type=int, default=64, help='Number of trajectories to process in a batch')
-    parser.add_argument('--max_steps_per_episode', type=int, default=32, help='Maximum steps per episode')
+    parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
+    parser.add_argument('--max_steps_per_episode', type=int, default=200, help='Maximum steps per episode')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
-    parser.add_argument('--gamma', type=float, default=0.8, help='Discount factor')
-    parser.add_argument('--max_step_norm', type=float, default=8, help='Maximum step norm')
+    parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
+    parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
-    parser.add_argument('--use_gpu_inference', type=bool, default=True, help='Use GPU for inference during rollout')
+    parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
     parser.add_argument('--log_steps', type=int, default=32, help='Logging frequency for gradient statistics')
-    parser.add_argument('--heatmap', type=bool, default=False, help='Save a heatmap of Z_t')
-    parser.add_argument('--use_quadrant', type=bool, default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
+    parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
+    parser.add_argument('--use_quadrant', action='store_true', default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
 
-    parser.add_argument('--use_next_state_loss', type=bool, default=False, help='Use next state prediction loss')
-    parser.add_argument('--use_same_page_loss', type=bool, default=False, help='Use on-the-same-page loss between next goal and dynamics')
-    parser.add_argument('--use_decoder_loss', type=bool, default=False, help='Enable decoder reconstruction warm-up loss')
-    parser.add_argument('--use_value_loss', type=bool, default=True, help='Train value head with MSE to returns')
+    parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
+    parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
+    parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
+    parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1e-5, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=5e-3, help='Weight for value loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1e-4, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_policy', type=float, default=1.0, help='Weight for policy loss')
+    parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
+    parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-3, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-3, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=1e-3, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-2, help='Learning rate for value')
+    parser.add_argument('--encoder_lr', type=float, default=3e-6, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-4, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=3e-6, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=3e-5, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
-    
-    # Precision parameters
-    parser.add_argument('--bf16', type=bool, default=False, help='Use BFloat16 mixed precision for training')
     
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_german', help='Directory to save model and logs')
-    parser.add_argument('--resume', type=bool, default=False, help='Resume training from checkpoint')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value5143', help='Directory to save model and logs')
+    parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
-    parser.add_argument('--base_reward', type=float, default=64, help='Base reward for each step')
-    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: plmd or rl')
+    #parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
+    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
+    parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
+
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    # track NaN
-    torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(True)     # catches backward NaNs
     train_pldm(args)
