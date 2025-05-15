@@ -129,6 +129,7 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
     crossed_door = False            # 标记是否已经拿过穿门奖励
 
     for step in range(max_steps):
+        step_reward = 0
         if done or truncated:
             break
 
@@ -172,7 +173,7 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
             curr_dist_to_target = torch.norm(env.dot_position - env.target_position).item()
             # 提前终止：如果距离目标非常近，给予大额奖励并终止 episode
             if curr_dist_to_target < 2.5:
-                print(f"[DEBUG] HIT TARGET at step {step}")
+                # print(f"[DEBUG] HIT TARGET at step {step}")
                 step_reward += BONUS_HIT_TARGET
                 done = True
             step_reward = TARGET_SCALE * (prev_dist_to_target - curr_dist_to_target)
@@ -995,7 +996,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
     # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=64, help='Dimension of encoded state (default 512 for discrete codes)')
+    parser.add_argument('--encoding_dim', type=int, default=256, help='Dimension of encoded state (default 512 for discrete codes)')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
     parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
     parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')

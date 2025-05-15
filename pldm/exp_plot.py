@@ -5,11 +5,19 @@ from pathlib import Path
 
 # Constants
 NUM_TRIALS = 6
-OUTPUT_DIR = Path('output3')
+OUTPUT_DIR = Path('output4')
 
 # Function to run qtrain.py with specified mode
-def run_qtrain(mode):
+def run_qtrain():
     for i in range(NUM_TRIALS):
+        mode = 'JEPA'
+        print(f"Running trial {i+1}/{NUM_TRIALS} for {mode} mode...")
+        subprocess.run([
+            'python', 'pldm/qtrain.py',
+            '--mode', str(mode),
+            '--output_dir', str(OUTPUT_DIR / f'{mode}_trial_{i+1}')
+        ])
+        mode = 'RL'
         print(f"Running trial {i+1}/{NUM_TRIALS} for {mode} mode...")
         subprocess.run([
             'python', 'pldm/qtrain.py',
@@ -17,15 +25,14 @@ def run_qtrain(mode):
             '--output_dir', str(OUTPUT_DIR / f'{mode}_trial_{i+1}')
         ])
 
+
 # Function to read rewards from a file
 def read_rewards(file_path):
     with open(file_path, 'r') as f:
         return [float(line.strip()) for line in f]
 
 # Run experiments
-run_qtrain('JEPA') # Run with JEPA mode
-run_qtrain('RL')  # Run with pure RL mode
-
+run_qtrain()
 
 # Collect and plot results
 rl_rewards = []

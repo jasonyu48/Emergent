@@ -5,7 +5,7 @@ from torch.distributions import Normal, Categorical
 from pathlib import Path
 import math
 
-NUM_CODES   = 64   # size of the discrete latent vocabulary
+NUM_CODES   = 256   # size of the discrete latent vocabulary
 NUM_ACTIONS = 32   # number of discrete actions for “RL” search-mode
 
 
