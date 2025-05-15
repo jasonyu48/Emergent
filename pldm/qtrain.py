@@ -998,8 +998,8 @@ def parse_args():
     # Model parameters
     parser.add_argument('--encoding_dim', type=int, default=256, help='Dimension of encoded state (default 512 for discrete codes)')
     parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
-    parser.add_argument('--encoder_embedding', type=int, default=200, help='Dimension of encoder embedding')
-    parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
+    parser.add_argument('--encoder_embedding', type=int, default=192, help='Dimension of encoder embedding')
+    parser.add_argument('--encoder_type', type=str, default='vit', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     
     # Training parameters
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
