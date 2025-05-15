@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Constants
-NUM_TRIALS = 10
-OUTPUT_DIR = Path('output2')
+NUM_TRIALS = 6
+OUTPUT_DIR = Path('output3')
 
 # Function to run qtrain.py with specified mode
 def run_qtrain(mode):
@@ -23,8 +23,9 @@ def read_rewards(file_path):
         return [float(line.strip()) for line in f]
 
 # Run experiments
-run_qtrain('RL')  # Run with pure RL mode
 run_qtrain('JEPA') # Run with JEPA mode
+run_qtrain('RL')  # Run with pure RL mode
+
 
 # Collect and plot results
 rl_rewards = []
@@ -46,9 +47,9 @@ jepa_std = jepa_rewards.std(axis=0)
 
 # Plot
 plt.figure(figsize=(10, 6))
-plt.plot(rl_mean, label='RL Mode', color='blue')
+plt.plot(rl_mean, label='RL', color='blue')
 plt.fill_between(range(len(rl_mean)), rl_mean - rl_std, rl_mean + rl_std, color='blue', alpha=0.2)
-plt.plot(jepa_mean, label='JEPA Mode', color='green')
+plt.plot(jepa_mean, label='JEPA + RL', color='green')
 plt.fill_between(range(len(jepa_mean)), jepa_mean - jepa_std, jepa_mean + jepa_std, color='green', alpha=0.2)
 plt.title('Average Reward vs Epoch')
 plt.xlabel('Epoch')

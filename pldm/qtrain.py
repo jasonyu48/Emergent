@@ -96,7 +96,7 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
     # ---------- 常量超参 ----------
     BONUS_CROSS_DOOR  = 100.0  # 增大穿门奖励
     BONUS_HIT_TARGET  = 2000.0  # 增大命中奖励
-    STEP_PENALTY      = 0.05   # 增大步数惩罚
+    STEP_PENALTY      = 1.0   # 增大步数惩罚
     WALL_PENALTY      = 2.0    # 增大撞墙惩罚
     TINY_MOVE_THRESH  = 0.3
     TINY_MOVE_PENALTY = 1.0    # 增大小动作惩罚
@@ -768,10 +768,10 @@ def train_pldm(args):
 
                 # Dynamics prediction
                 if args.mode == 'RL':
-                    print("RL mode")
+                    # print("RL mode")
                     Z_next_pred = model.dynamics(Z_t.detach(),A_t) # Control the grad flow of the world model
                 else:
-                    print("JEPA mode")
+                    # print("JEPA mode")
                     Z_next_pred = model.dynamics(Z_t,A_t) 
                 # ---------------- losses ----------------
                 # KL divergence between predicted and target probability distributions
@@ -1019,15 +1019,15 @@ def parse_args():
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=1.0, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=100.0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e-2, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
     parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
     parser.add_argument('--encoder_lr', type=float, default=3e-6, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-4, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=3e-6, help='Learning rate for policy')
+    parser.add_argument('--dynamics_lr', type=float, default=1e-5, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=3e-5, help='Learning rate for policy')
     parser.add_argument('--value_lr', type=float, default=3e-5, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
     
@@ -1043,7 +1043,7 @@ def parse_args():
     parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
 
     # Add a new argument to choose between immediate rewards and discounted returns
-    parser.add_argument('--use_immediate_reward', action='store_true', default=True, help='Use immediate reward for advantage calculation and value network training')
+    parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
 
     return parser.parse_args()
 
