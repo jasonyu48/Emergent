@@ -711,7 +711,12 @@ def train_pldm(args):
                 # reduces the dynamic range of the value-head gradients and makes
                 # NaN explosions far less likely.
                 # ------------------------------------------------------------------
-                batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
+                if args.use_immediate_reward:
+                    # Use immediate rewards for advantage calculation and value network training
+                    batch_returns_tensor = torch.tensor(rewards, dtype=torch.float32, device=device)
+                else:
+                    # Use discounted returns
+                    batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
 
                 if args.normalize_returns_and_advantage:
                     mean_R = batch_returns_tensor.mean()
@@ -1034,6 +1039,9 @@ def parse_args():
     #parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
     parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
     parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
+
+    # Add a new argument to choose between immediate rewards and discounted returns
+    parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
 
     return parser.parse_args()
 
