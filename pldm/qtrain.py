@@ -768,8 +768,10 @@ def train_pldm(args):
 
                 # Dynamics prediction
                 if args.mode == 'RL':
+                    print("RL mode")
                     Z_next_pred = model.dynamics(Z_t.detach(),A_t) # Control the grad flow of the world model
                 else:
+                    print("JEPA mode")
                     Z_next_pred = model.dynamics(Z_t,A_t) 
                 # ---------------- losses ----------------
                 # KL divergence between predicted and target probability distributions
@@ -1041,7 +1043,7 @@ def parse_args():
     parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
 
     # Add a new argument to choose between immediate rewards and discounted returns
-    parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
+    parser.add_argument('--use_immediate_reward', action='store_true', default=True, help='Use immediate reward for advantage calculation and value network training')
 
     return parser.parse_args()
 
