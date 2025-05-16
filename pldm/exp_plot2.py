@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Constants
-NUM_TRIALS = 2
-OUTPUT_DIR = Path('output516')
+NUM_TRIALS = 5
+OUTPUT_DIR = Path('output516_kl2')
 
 # Function to run qtrain.py with specified mode
 def run_qtrain():

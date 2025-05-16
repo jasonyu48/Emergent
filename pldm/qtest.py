@@ -9,9 +9,10 @@ import imageio
 from torchvision import transforms as T
 from PIL import Image
 import torch.nn as nn
+import configparser # For reading experiment_info.txt
 
 from pldm_envs.wall.wall import DotWall
-from pldm.qmodel import PLDMModel
+from pldm.qmodel import PLDMModel, DEFAULT_ENCODING_DIM, DEFAULT_NUM_ACTIONS # Import defaults
 
 
 def check_for_nan(tensor, name="tensor", raise_error=True):
@@ -58,7 +59,8 @@ def visualize_trajectory(frames, recon_frames, dot_positions, target_position, w
     output_dir.mkdir(exist_ok=True, parents=True)
 
     frames_np = [frame.cpu().numpy() for frame in frames]
-    recon_frames_np = [frame.cpu().numpy() for frame in recon_frames]
+    # Ensure recon_frames are also numpy and on CPU before processing
+    recon_frames_np = [(frame.cpu().numpy() if isinstance(frame, torch.Tensor) else frame) for frame in recon_frames]
     plt_frames = []
 
     for i, (frame, recon_frame) in enumerate(zip(frames_np, recon_frames_np)):
@@ -103,7 +105,7 @@ def visualize_trajectory(frames, recon_frames, dot_positions, target_position, w
     make_gif(plt_frames, output_path, fps=2)
 
 
-def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, use_quadrant=True):
+def rollout_episode(model, env, max_steps, device, max_step_norm):
     """Rollout one episode using the same reward scheme as qtrain."""
     BONUS_CROSS_DOOR = 100.0
     BONUS_HIT_TARGET = 2000.0
@@ -118,7 +120,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
     door_center = torch.stack([env.wall_x, env.hole_y]).to(env.device, dtype=torch.float32)
 
     states, actions, rewards = [obs], [], []
-    next_goals, reconstructions = [], []
+    reconstructions = []
     dot_positions = [env.dot_position.cpu().numpy()]
 
     crossed_door = False
@@ -140,18 +142,13 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
             break
 
         with torch.no_grad():
-            z_next, _ = model.predict_next_goal(z_t)
-            next_goals.append(z_next.cpu())
+            # Get continuous action directly from the policy via PLDMModel
+            continuous_action_tensor, _, _ = model.get_action_and_log_prob(z_t, sample=True) # Sample=True for eval
+            # No separate search_action needed
+        
+        action_to_step = continuous_action_tensor.cpu().numpy()[0] # Get batch 0, convert to numpy
 
-            a_t = model.search_action(
-                z_t.detach(), z_next.detach(),
-                num_samples=num_samples,
-                max_step_norm=max_step_norm,
-                use_quadrant=use_quadrant
-            )
-        action = a_t.cpu().numpy()[0]
-
-        obs, _, done, truncated, info = env.step(action)
+        obs, _, done, truncated, info = env.step(action_to_step)
         dot_positions.append(env.dot_position.cpu().numpy())
 
         dot_left = env.dot_position[0] < env.left_wall_x
@@ -173,7 +170,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
             step_reward = TARGET_SCALE * (prev_dist_to_target - curr_dist_to_target)
             step_reward += 20.0 * np.exp(-curr_dist_to_target / 10)
 
-            v_a = action / (np.linalg.norm(action) + 1e-6)
+            v_a = action_to_step / (np.linalg.norm(action_to_step) + 1e-6) # Use action_to_step
             v_t = (env.target_position.cpu().numpy() - env.dot_position.cpu().numpy())
             dist_to_target = np.linalg.norm(v_t)
             v_t = v_t / (dist_to_target + 1e-6)
@@ -188,7 +185,7 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
             prev_dist_to_target = curr_dist_to_target
 
         step_reward -= STEP_PENALTY
-        if np.linalg.norm(action) < TINY_MOVE_THRESH:
+        if np.linalg.norm(action_to_step) < TINY_MOVE_THRESH:
             step_reward -= TINY_MOVE_PENALTY
         if env.position_history and torch.all(env.position_history[-1] == env.dot_position):
             step_reward -= WALL_PENALTY
@@ -200,10 +197,16 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
             obs_tensor = (obs if isinstance(obs, torch.Tensor) else
                           torch.tensor(obs, dtype=torch.float32, device=device)).unsqueeze(0)
             z_t = model.encode(obs_tensor)
-            reconstructions.append(model.decode(z_t).squeeze(0).cpu())
+            # Check if decoder exists and is not None before calling
+            if hasattr(model, 'decoder') and model.decoder is not None:
+                 reconstructions.append(model.decode(z_t).squeeze(0).cpu())
+            else:
+                 # Append a placeholder if no decoder, e.g., a zero tensor or skip reconstruction visualization
+                 placeholder_recon = torch.zeros_like(obs_tensor.squeeze(0).cpu()) # Match shape of obs
+                 reconstructions.append(placeholder_recon)
 
         states.append(obs)
-        actions.append(action)
+        actions.append(action_to_step) # Store the continuous action taken
         prev_in_left = env.dot_position[0] < env.left_wall_x
 
     final_distance = torch.norm(env.dot_position - env.target_position).item()
@@ -212,7 +215,6 @@ def rollout_episode(model, env, max_steps, num_samples, device, max_step_norm, u
         "actions": actions,
         "dot_positions": dot_positions,
         "rewards": rewards,
-        "next_goals": [g.numpy() for g in next_goals],
         "reconstructions": reconstructions,
         "total_reward": episode_reward,
         "done": done,
@@ -248,34 +250,80 @@ class NanDetector:
             print("NaN detection disabled")
 
 
-def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episodes=5,
-                   max_steps=50, num_samples=100, max_step_norm=15,
-                   encoder_embedding=200, encoding_dim=64, hidden_dim=512,
-                   use_quadrant=True, temperature=1.0, encoder_type='cnn',
-                   next_goal_temp=None, search_mode='pldm'):
+def load_config_from_experiment_info(exp_info_path: Path) -> dict:
+    """Loads configuration from experiment_info.txt file."""
+    config = {}
+    if not exp_info_path.exists():
+        print(f"Warning: experiment_info.txt not found at {exp_info_path}. Using defaults or CLI args where possible.")
+        return config
+
+    print(f"Loading configuration from {exp_info_path}")
+    with open(exp_info_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("--"):
+                parts = line.split(':', 1)
+                if len(parts) == 2:
+                    key = parts[0].strip().lstrip('--')
+                    value_str = parts[1].strip()
+                    # Attempt to infer type
+                    if value_str.lower() == 'true':
+                        config[key] = True
+                    elif value_str.lower() == 'false':
+                        config[key] = False
+                    elif value_str.lower() == 'none':
+                        config[key] = None
+                    else:
+                        try:
+                            if '.' in value_str or 'e' in value_str.lower():
+                                config[key] = float(value_str)
+                            else:
+                                config[key] = int(value_str)
+                        except ValueError:
+                            config[key] = value_str # Store as string if conversion fails
+    return config
+
+
+def evaluate_model(model_path_str: str, output_dir_str:str ='test_output', device_str:str='cpu', 
+                   num_episodes:int=5, max_steps:int=50, eval_max_step_norm:float=None):
     """Evaluate the trained model on the DotWall environment."""
-    output_dir = Path(output_dir)
+    model_path = Path(model_path_str)
+    output_dir = Path(output_dir_str)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    device = torch.device(device)
-    env = DotWall(max_step_norm=max_step_norm, door_space=8)
+    device = torch.device(device_str)
+    
+    # Load experiment config to get model parameters
+    exp_info_path = model_path.parent / "experiment_info.txt"
+    train_args = load_config_from_experiment_info(exp_info_path)
+
+    # Determine model parameters from loaded config or use defaults
+    model_encoding_dim = train_args.get('model_encoding_dim', DEFAULT_ENCODING_DIM)
+    num_actions = train_args.get('num_actions', DEFAULT_NUM_ACTIONS)
+    encoder_embedding_dim = train_args.get('encoder_embedding_dim', 256) # Default from old qtrain
+    encoder_type = train_args.get('encoder_type', 'vit')
+    policy_temperature = train_args.get('policy_temperature', 1.0)
+    # max_step_norm for action grid in PLDMModel should come from training config
+    # If eval_max_step_norm is provided for env, use that, otherwise use training's max_step_norm
+    pldm_max_step_norm = train_args.get('max_step_norm', 15.0)
+    env_max_step_norm = eval_max_step_norm if eval_max_step_norm is not None else pldm_max_step_norm
+
+    env = DotWall(max_step_norm=env_max_step_norm, door_space=8)
 
     print(f"Loading model from {model_path}")
     checkpoint = torch.load(model_path, map_location=device)
 
-    print(f"Creating model with: encoding_dim={encoding_dim}, hidden_dim={hidden_dim}, encoder_embedding={encoder_embedding}")
+    print(f"Creating model with: model_encoding_dim={model_encoding_dim}, num_actions={num_actions}, encoder_type={encoder_type}")
     model = PLDMModel(
-        img_size=env.img_size,
-        in_channels=3,
-        encoding_dim=encoding_dim,
-        action_dim=2,
-        hidden_dim=hidden_dim,
-        encoder_embedding=encoder_embedding,
+        img_size=env.img_size, # Get from env
+        in_channels=3,         # DotWall specific
+        encoding_dim=model_encoding_dim,
+        num_actions=num_actions,
+        encoder_embedding_dim=encoder_embedding_dim,
         encoder_type=encoder_type,
-        temperature=temperature,
-        next_goal_temp=next_goal_temp,
-        search_mode=search_mode,
-        max_step_norm=max_step_norm
+        policy_temp=policy_temperature,
+        max_step_norm=pldm_max_step_norm # For action_grid generation
+        # Other params like action_dim_continuous, multipliers use defaults in PLDMModel
     ).to(device)
 
     model.print_parameter_count()
@@ -283,13 +331,21 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
     if 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
         print("Loaded model from model_state_dict")
+    elif checkpoint:
+        try:
+            model.load_state_dict(checkpoint)
+            print("Loaded model directly from checkpoint")
+        except RuntimeError as e:
+            print(f"Error loading state_dict directly: {e}")
+            print("This might be due to model structure changes. Ensure the checkpoint matches the current model structure or was saved as 'model_state_dict'.")
+            return 0.0, 0.0 # Cannot proceed
     else:
-        model.load_state_dict(checkpoint)
-        print("Loaded model directly from checkpoint")
+        print("Error: Checkpoint is empty or invalid.")
+        return 0.0, 0.0
 
     model.eval()
-    print("Using parallel action search with", num_samples, "samples per step")
-    print(f"Action sampling strategy: {'quadrant-based' if use_quadrant else 'full action space'}")
+    # print("Using parallel action search with", num_samples, "samples per step") # Obsolete
+    # print(f"Action sampling strategy: {'quadrant-based' if use_quadrant else 'full action space'}") # Obsolete
 
     success_count = 0
     total_rewards = []
@@ -302,10 +358,8 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
                     model=model,
                     env=env,
                     max_steps=max_steps,
-                    num_samples=num_samples,
                     device=device,
-                    max_step_norm=max_step_norm,
-                    use_quadrant=use_quadrant
+                    max_step_norm=env_max_step_norm # Pass env's max_step_norm for rollout logic if needed
                 )
 
                 states = result['states']
@@ -365,40 +419,23 @@ def evaluate_model(model_path, output_dir='test_output', device='cpu', num_episo
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
-    parser.add_argument('--model_path', type=str, default='output_same_page_value5142/best_model.pt')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value5142_best')
+    parser.add_argument('--model_path', type=str, default='output_pldm_refactored/best_model.pt')
+    parser.add_argument('--output_dir', type=str, default='output_pldm_refactored_test')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--num_episodes', type=int, default=10)
     parser.add_argument('--max_steps', type=int, default=200)
-    parser.add_argument('--num_samples', type=int, default=8)
-    parser.add_argument('--max_step_norm', type=float, default=12)
-    parser.add_argument('--encoding_dim', type=int, default=64)
-    parser.add_argument('--hidden_dim', type=int, default=512)
-    parser.add_argument('--encoder_embedding', type=int, default=200)
-    parser.add_argument('--temperature', type=float, default=1.0)
-    parser.add_argument('--encoder_type', type=str, default='cnn', choices=['vit', 'cnn'])
-    parser.add_argument('--next_goal_temp', type=float, default=1.0)
-    parser.add_argument('--use_quadrant', action='store_true', default=True)
-    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm', 'rl'])
+    parser.add_argument('--eval_max_step_norm', type=float, default=None, 
+                        help='Max step norm for DotWall env during evaluation. If None, uses value from training config.')
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
     evaluate_model(
-        model_path=args.model_path,
-        output_dir=args.output_dir,
-        device=args.device,
+        model_path_str=args.model_path,
+        output_dir_str=args.output_dir,
+        device_str=args.device,
         num_episodes=args.num_episodes,
         max_steps=args.max_steps,
-        num_samples=args.num_samples,
-        max_step_norm=args.max_step_norm,
-        encoder_embedding=args.encoder_embedding,
-        encoding_dim=args.encoding_dim,
-        hidden_dim=args.hidden_dim,
-        use_quadrant=args.use_quadrant,
-        temperature=args.temperature,
-        encoder_type=args.encoder_type,
-        next_goal_temp=args.next_goal_temp,
-        search_mode=args.search_mode
+        eval_max_step_norm=args.eval_max_step_norm
     )

@@ -27,7 +27,7 @@ except Exception:
     pass
 
 from pldm_envs.wall.wall import DotWall
-from pldm.qmodel import PLDMModel
+from pldm.qmodel import PLDMModel, DEFAULT_ENCODING_DIM, DEFAULT_NUM_ACTIONS
 
 # ----------  NEW: helper to remove NaN / Inf & clip  ----------
 def _sanitize_pos(pos: torch.Tensor, max_x: float, max_y: float):
@@ -109,8 +109,9 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
     # 门中心（Tensor，跟随 env.device）
     door_center = torch.stack([env.wall_x, env.hole_y]).to(env.device, dtype=torch.float32)
 
-    states, actions, rewards = [obs], [], []
-    log_probs, next_goals = [], []
+    # Store observations, continuous actions, rewards, log_probs of sampled action_idx, and one-hot action_idx
+    states, continuous_actions, rewards = [obs], [], []
+    log_probs_list, sampled_action_idx_one_hot_list = [], []
 
     # 初始化潜势
     prev_dist_to_door    = torch.norm(env.dot_position - door_center).item()
@@ -133,22 +134,24 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
         if done or truncated:
             break
 
-        # ---------- 2. 预测下一 latent-goal ----------
+        # ---------- 2. Get action from policy ----------
         with torch.no_grad():
-            z_next, log_prob = model.predict_next_goal(z_t)
-            next_goals.append(z_next.squeeze(0).cpu())
-            log_probs.append(log_prob.item())
+            # model.get_action_and_log_prob returns: continuous_action, log_prob_of_idx, action_idx
+            continuous_action_tensor, log_prob, action_idx = model.get_action_and_log_prob(z_t)
+            
+            # Get num_actions for one-hot encoding from the model
+            # It's safer to get it directly if possible, or pass as arg if PLDMModel stores it directly
+            num_actions_for_one_hot = model.num_actions
+            action_idx_one_hot = F.one_hot(action_idx, num_classes=num_actions_for_one_hot).float().squeeze(0) # Remove batch dim
 
-        # ---------- 3. 搜索动作 ----------
-        a_t = model.search_action(
-            z_t.detach(), z_next.detach(),
-            num_samples=num_samples,
-            use_quadrant=use_quadrant
-        )
-        action = a_t.cpu().numpy()[0]
+            sampled_action_idx_one_hot_list.append(action_idx_one_hot.cpu())
+            log_probs_list.append(log_prob.item())
+        
+        # Convert continuous_action_tensor to numpy for environment step
+        action_to_step = continuous_action_tensor.cpu().numpy()[0] # Remove batch dim
 
         # ---------- 4. 与环境交互 ----------
-        obs, _, done, truncated, info = env.step(action)
+        obs, _, done, truncated, info = env.step(action_to_step)
 
         # ---------- 5. 奖励计算 ----------
         # 房间判断
@@ -182,7 +185,7 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
             step_reward += 20.0 * np.exp(-curr_dist_to_target / 10)
             
             # 方向奖励使用指数函数增强近距离精确性
-            v_a = action / (np.linalg.norm(action) + 1e-6)
+            v_a = action_to_step / (np.linalg.norm(action_to_step) + 1e-6)
             v_t = (env.target_position.cpu().numpy() - env.dot_position.cpu().numpy())
             dist_to_target = np.linalg.norm(v_t)
             v_t = v_t / (dist_to_target + 1e-6)
@@ -198,14 +201,14 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
 
         # ---- 通用惩罚 ----
         step_reward -= STEP_PENALTY  # 每步都扣
-        if np.linalg.norm(action) < TINY_MOVE_THRESH:
+        if np.linalg.norm(action_to_step) < TINY_MOVE_THRESH:
             step_reward -= TINY_MOVE_PENALTY
         if env.position_history and torch.all(env.position_history[-1] == env.dot_position):
             step_reward -= WALL_PENALTY
 
         # ---------- 存储 ----------
         states.append(obs)
-        actions.append(action)
+        continuous_actions.append(action_to_step) # Store the continuous action taken
         rewards.append(step_reward)
 
         # ---------- 编码下一观测 ----------
@@ -219,10 +222,10 @@ def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: 
     model.train()
     return {
         "states":   states,
-        "actions":  actions,
+        "actions":  continuous_actions, # Now storing continuous actions
         "rewards":  rewards,
-        "log_probs": log_probs,
-        "next_goals": next_goals,
+        "log_probs": log_probs_list, # Log probs of a_idx
+        "sampled_actions_one_hot": sampled_action_idx_one_hot_list, # Store one-hot action_idx
         "done":     done
     }
 
@@ -258,10 +261,10 @@ def _log_grad_update_stats(model, optimizer, step_idx=0):
 
         if name.startswith('encoder'):
             key = 'encoder'
-        elif name.startswith('dynamics'):
+        elif name.startswith('dynamics_model'):
             key = 'dynamics'
-        elif name.startswith('next_goal_predictor'):
-            if name.startswith('next_goal_predictor.value_mlp'):
+        elif name.startswith('policy_value_network'):
+            if name.startswith('policy_value_network.value_mlp'):
                 key = 'value_net'
             else:
                 key = 'policy_net'
@@ -377,16 +380,13 @@ class ParallelEpisodeCollector:
     """Collect episodes in parallel for faster training"""
     
     def __init__(self, model, env_creator, max_steps, device, 
-                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True, 
-                 num_samples=100, use_quadrant=True):
+                 num_workers=4, prefetch_queue_size=8, use_gpu_for_inference=True):
         self.model = model
         self.env_creator = env_creator
         self.max_steps = max_steps
         self.device = device
         self.num_workers = num_workers
         self.use_gpu_for_inference = use_gpu_for_inference
-        self.num_samples = num_samples
-        self.use_quadrant = use_quadrant
         self.prefetch_queue_size = prefetch_queue_size
         
         # Create worker environments
@@ -423,9 +423,7 @@ class ParallelEpisodeCollector:
                             self.model,
                             env,
                             max_steps=self.max_steps,
-                            device=self.device,
-                            num_samples=self.num_samples,
-                            use_quadrant=self.use_quadrant
+                            device=self.device
                         )
                 else:
                     # Create CPU copy for inference
@@ -435,9 +433,7 @@ class ParallelEpisodeCollector:
                         local_model,
                         env,
                         max_steps=self.max_steps,
-                        device='cpu',
-                        num_samples=self.num_samples,
-                        use_quadrant=self.use_quadrant
+                        device='cpu'
                     )
                 
                 # Skip empty trajectories
@@ -505,14 +501,12 @@ def train_pldm(args):
     model = PLDMModel(
         img_size=env.img_size,
         in_channels=3,  # DotWall has 3 channels: dot, wall, target
-        encoding_dim=args.encoding_dim,
-        action_dim=2,  # DotWall has 2D actions
-        hidden_dim=args.hidden_dim,
-        encoder_embedding=args.encoder_embedding,
+        encoding_dim=args.model_encoding_dim,
+        num_actions=args.num_actions,
+        action_dim_continuous=2, # DotWall has 2D continuous actions
+        encoder_embedding_dim=args.encoder_embedding_dim,
         encoder_type=args.encoder_type,
-        temperature=args.temperature,
-        next_goal_temp=args.next_goal_temp,
-        search_mode=args.search_mode,
+        policy_temp=args.policy_temperature,
         max_step_norm=args.max_step_norm
     ).to(device)
     
@@ -522,12 +516,12 @@ def train_pldm(args):
     # ---------------------------------------------------------------
     # Separate parameter groups: encoder, dynamics, policy-net, value-net, decoder
     # ---------------------------------------------------------------
-    policy_params = [p for n, p in model.next_goal_predictor.named_parameters() if not n.startswith('value_mlp')]
-    value_params = list(model.next_goal_predictor.value_mlp.parameters())
+    policy_params = [p for n, p in model.policy_value_network.named_parameters() if not n.startswith('value_mlp')]
+    value_params = list(model.policy_value_network.value_mlp.parameters())
 
     optimizer = optim.AdamW([
         {'params': model.encoder.parameters(),           'lr': args.encoder_lr},
-        {'params': model.dynamics.parameters(),          'lr': args.dynamics_lr},
+        {'params': model.dynamics_model.parameters(),      'lr': args.dynamics_lr},
         {'params': policy_params,                        'lr': args.policy_lr},
         {'params': value_params,                         'lr': args.value_lr},
         {'params': model.decoder.parameters(),           'lr': args.decoder_lr},
@@ -592,7 +586,6 @@ def train_pldm(args):
     # Determine number of data loader workers based on CPU cores
     num_workers = min(args.num_workers if hasattr(args, 'num_workers') else 4, max(1, (multiprocessing.cpu_count() - 1) // 2))
     print(f"Using {num_workers} parallel workers for episode collection")
-    print(f"Action sampling strategy: {'quadrant-based' if args.use_quadrant else 'full action space'}")
 
     # ---------------------------------------------------------------------
     # Sanity check: batch_size must divide (num_workers * max_steps_per_episode)
@@ -614,14 +607,12 @@ def train_pldm(args):
         device=device,
         num_workers=num_workers,
         prefetch_queue_size=8,  # 显式设置队列大小
-        use_gpu_for_inference=args.use_gpu_inference,
-        num_samples=args.num_samples,
-        use_quadrant=args.use_quadrant
+        use_gpu_for_inference=args.use_gpu_inference
     )
 
     try:
         # Training loop
-        transition_buffer = []  # holds (s, s_next, a, ng, R_t)
+        transition_buffer = []  # holds (s_t, s_next, a_continuous_t, a_one_hot_idx_t, R_t)
         for epoch in range(start_epoch, args.epochs):
             total_reward = 0
             total_policy_loss = 0
@@ -665,27 +656,29 @@ def train_pldm(args):
                         continue
 
                     traj = episodes[0]
-                    states = traj['states']
-                    actions = traj['actions']
-                    rewards = traj['rewards']
-                    next_goals = traj['next_goals']
+                    states_rollout = traj['states']
+                    continuous_actions_rollout = traj['actions']
+                    rewards_rollout = traj['rewards']
+                    # NG_store will be populated by sampled_actions_one_hot
+                    sampled_actions_one_hot_rollout = traj['sampled_actions_one_hot'] 
 
-                    T = len(actions)
+                    T = len(continuous_actions_rollout)
 
                     # stats
-                    episode_reward = sum(rewards)
+                    episode_reward = sum(rewards_rollout)
                     total_reward += episode_reward
                     num_episodes += 1
 
                     # returns
-                    returns = compute_returns(rewards, gamma=args.gamma)
+                    returns = compute_returns(rewards_rollout, gamma=args.gamma)
 
                     for t in range(T):
-                        s_t = torch.tensor(states[t], device=device).float() if not isinstance(states[t], torch.Tensor) else states[t].to(device).float()
-                        s_next = torch.tensor(states[t+1], device=device).float() if not isinstance(states[t+1], torch.Tensor) else states[t+1].to(device).float()
-                        a_t = torch.tensor(actions[t], device=device).float() if not isinstance(actions[t], torch.Tensor) else actions[t].to(device).float()
-                        ng_t = torch.tensor(next_goals[t], device=device).float() if not isinstance(next_goals[t], torch.Tensor) else next_goals[t].to(device).float()
-                        transition_buffer.append((s_t, s_next, a_t, ng_t, returns[t].item()))
+                        s_t = torch.tensor(states_rollout[t], device=device).float() if not isinstance(states_rollout[t], torch.Tensor) else states_rollout[t].to(device).float()
+                        s_next = torch.tensor(states_rollout[t+1], device=device).float() if not isinstance(states_rollout[t+1], torch.Tensor) else states_rollout[t+1].to(device).float()
+                        # Store continuous action for dynamics model, and one-hot action for policy loss
+                        a_continuous_t = torch.tensor(continuous_actions_rollout[t], device=device).float() if not isinstance(continuous_actions_rollout[t], torch.Tensor) else continuous_actions_rollout[t].to(device).float()
+                        a_one_hot_idx_t = torch.tensor(sampled_actions_one_hot_rollout[t], device=device).float() if not isinstance(sampled_actions_one_hot_rollout[t], torch.Tensor) else sampled_actions_one_hot_rollout[t].to(device).float()
+                        transition_buffer.append((s_t, s_next, a_continuous_t, a_one_hot_idx_t, returns[t].item()))
 
                 # ------------------------------------------------------------
                 # 2) Sample batch_size transitions *without replacement*
@@ -694,13 +687,13 @@ def train_pldm(args):
                 indices = _rnd.sample(range(len(transition_buffer)), args.batch_size)
                 indices.sort(reverse=True)  # sort descending for safe pop
 
-                batch_states, batch_next_states, batch_actions, batch_next_goals, batch_returns = [], [], [], [], []
+                batch_states, batch_next_states, batch_continuous_actions, batch_action_one_hot, batch_returns = [], [], [], [], []
                 for idx in indices:
-                    s_t, s_next, a_t, ng_t, R_t = transition_buffer.pop(idx)
+                    s_t, s_next, a_continuous_t, a_one_hot_idx_t, R_t = transition_buffer.pop(idx)
                     batch_states.append(s_t)
                     batch_next_states.append(s_next)
-                    batch_actions.append(a_t)
-                    batch_next_goals.append(ng_t)
+                    batch_continuous_actions.append(a_continuous_t)
+                    batch_action_one_hot.append(a_one_hot_idx_t)
                     batch_returns.append(R_t)
 
                 # ------------------------------------------------------------
@@ -714,7 +707,7 @@ def train_pldm(args):
                 # ------------------------------------------------------------------
                 if args.use_immediate_reward:
                     # Use immediate rewards for advantage calculation and value network training
-                    batch_returns_tensor = torch.tensor(rewards, dtype=torch.float32, device=device)
+                    batch_returns_tensor = torch.tensor(rewards_rollout, dtype=torch.float32, device=device)
                 else:
                     # Use discounted returns
                     batch_returns_tensor = torch.tensor(batch_returns, dtype=torch.float32, device=device)
@@ -737,8 +730,10 @@ def train_pldm(args):
                                   for s in batch_states]).float().detach()
                 S_next = torch.stack([s if isinstance(s, torch.Tensor) else torch.tensor(s, dtype=torch.float32, device=device)
                                      for s in batch_next_states]).float().detach()
-                A_t = torch.stack(batch_actions).to(device).float().detach()
-                NG_store = torch.stack(batch_next_goals).to(device).float().detach()
+                # A_t is now continuous actions for dynamics model
+                A_continuous_t = torch.stack(batch_continuous_actions).to(device).float().detach()
+                # Action_OneHot_Batch is for policy loss (previously NG_store)
+                Action_OneHot_Batch = torch.stack(batch_action_one_hot).to(device).float().detach()
 
                 # Encode in one shot
                 Z_t = model.encode(S_t)
@@ -752,11 +747,11 @@ def train_pldm(args):
 
                 Z_next_actual = model.encode(S_next)
 
-                # Policy log-prob (no grad through stored goal)
-                log_probs = model.next_goal_predictor.log_prob(Z_t, NG_store)  # [B]
+                # Policy log-prob (using stored one-hot action)
+                log_probs = model.get_log_prob_of_action(Z_t, Action_OneHot_Batch)  # [B]
 
                 # Value prediction
-                V_pred = model.next_goal_predictor.value(Z_t) #grad flow from value head
+                V_pred = model.get_value_prediction(Z_t) #grad flow from value head
                 V_pred = torch.clamp(V_pred, -20.0, 20.0)        # 限定数值范围
                 V_pred = torch.nan_to_num(
                     V_pred,
@@ -767,13 +762,13 @@ def train_pldm(args):
                     V_pred = torch.nan_to_num(V_pred, nan=0.0, posinf=0.0, neginf=0.0)
                     value_loss = F.smooth_l1_loss(V_pred_safe, batch_returns_tensor)
 
-                # Dynamics prediction
+                # Dynamics prediction (uses continuous actions)
                 if args.mode == 'RL':
                     # print("RL mode")
-                    Z_next_pred = model.dynamics(Z_t.detach(),A_t) # Control the grad flow of the world model
+                    Z_next_pred = model.predict_next_latent(Z_t.detach(), A_continuous_t) # Control the grad flow of the world model
                 else:
                     # print("JEPA mode")
-                    Z_next_pred = model.dynamics(Z_t,A_t) 
+                    Z_next_pred = model.predict_next_latent(Z_t, A_continuous_t)
                 # ---------------- losses ----------------
                 # KL divergence between predicted and target probability distributions
                 eps = 1e-8
@@ -787,19 +782,20 @@ def train_pldm(args):
                 # ------------------------------------------------------------------
                 avg_mag_z_t         = Z_t.norm(dim=-1).mean().item()
                 avg_mag_z_next_pred = Z_next_pred.norm(dim=-1).mean().item()
-                avg_mag_ng_store    = NG_store.norm(dim=-1).mean().item()
+                avg_mag_action_one_hot = Action_OneHot_Batch.norm(dim=-1).mean().item() # Mag of one-hot actions (should be 1)
 
                 if global_step % args.log_steps == 0:
                     tqdm.write(
-                         f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||ng_store||={avg_mag_ng_store:.3f}"
+                         f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||action_one_hot||={avg_mag_action_one_hot:.3f}"
                     )
 
                     # Count distinct discrete codes in this batch
-                    z_codes = Z_t.argmax(dim=1)
-                    ng_codes = NG_store.argmax(dim=1)
+                    z_codes = Z_t.argmax(dim=1) if Z_t.shape[-1] > 1 and Z_t.is_floating_point() else Z_t # Handle if Z_t is already codes
+                    # Action_OneHot_Batch is already one-hot, convert to indices for unique count
+                    action_indices_batch = Action_OneHot_Batch.argmax(dim=1) 
                     num_z_codes = int(torch.unique(z_codes).numel())
-                    num_ng_codes = int(torch.unique(ng_codes).numel())
-                    tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | next_goal_codes={num_ng_codes}")
+                    num_action_indices = int(torch.unique(action_indices_batch).numel())
+                    tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | policy_action_indices={num_action_indices}")
 
                 if args.use_same_page_loss:
                     on_the_same_page_loss = torch.tensor(0.0, device=device)
@@ -827,8 +823,8 @@ def train_pldm(args):
 
                 if args.lambda_entropy > 0:
                     # Entropy bonus for exploration, compute manually for numerical stability
-                    dist = model.next_goal_predictor.get_numerical_stable_distribution(Z_t)
-                    entropy = - (dist * (dist + eps).log()).sum(dim=-1).mean()
+                    dist_probs = model.get_action_distribution_probs(Z_t) # Renamed method in PLDMModel
+                    entropy = - (dist_probs * (dist_probs + eps).log()).sum(dim=-1).mean()
                     writer.add_scalar('Stats/entropy', entropy.item(), global_step)
                 else:
                     entropy = torch.tensor(0.0, device=device)
@@ -860,18 +856,18 @@ def train_pldm(args):
                     _log_encoder_grad_sources(encoder_params_list, loss_contributions, global_step, prefix="EncGradSources")
 
                     # Policy network gradients (all params excluding value_mlp)
-                    policy_params_list = [p for n,p in model.next_goal_predictor.named_parameters() if not n.startswith('value_mlp')]
+                    policy_params_list = [p for n,p in model.policy_value_network.named_parameters() if not n.startswith('value_mlp') and p.requires_grad] # updated name
                     _log_encoder_grad_sources(policy_params_list, loss_contributions, global_step, prefix="PolicyGradSources")
 
                     # Dynamics model gradients
-                    dynamics_params_list = list(model.dynamics.parameters())
+                    dynamics_params_list = [p for p in model.dynamics_model.parameters() if p.requires_grad] # updated name
                     _log_encoder_grad_sources(dynamics_params_list, loss_contributions, global_step, prefix="DynamicsGradSources")
 
                 # Optimizer step
                 loss.backward()
                 # First, clip gradients on the value head a bit harder — it is
                 # the most common source of exploding weights.
-                torch.nn.utils.clip_grad_norm_(model.next_goal_predictor.value_mlp.parameters(), max_norm=0.1)
+                torch.nn.utils.clip_grad_norm_(model.policy_value_network.value_mlp.parameters(), max_norm=0.1)
 
                 # Then clip the entire model to a reasonable global norm.
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -890,7 +886,7 @@ def train_pldm(args):
                 writer.add_scalar('Reward/individual_episode', batch_returns[0], global_step)
                 writer.add_scalar('Stats/mag_z_t', avg_mag_z_t, global_step)
                 writer.add_scalar('Stats/mag_z_next_pred', avg_mag_z_next_pred, global_step)
-                writer.add_scalar('Stats/mag_ng_store', avg_mag_ng_store, global_step)
+                writer.add_scalar('Stats/mag_action_one_hot', avg_mag_action_one_hot, global_step)
 
                 # ---------------- aggregate epoch-level stats -----------------
                 total_policy_loss += policy_loss.item()
@@ -995,26 +991,29 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Train PLDM model on DotWall environment')
     
-    # Model parameters
-    parser.add_argument('--encoding_dim', type=int, default=256, help='Dimension of encoded state (default 512 for discrete codes)')
-    parser.add_argument('--hidden_dim', type=int, default=512, help='Dimension of hidden layers')
-    parser.add_argument('--encoder_embedding', type=int, default=192, help='Dimension of encoder embedding')
-    parser.add_argument('--encoder_type', type=str, default='vit', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
-    
+    # Model parameters (newly added or renamed)
+    parser.add_argument('--model_encoding_dim', type=int, default=DEFAULT_ENCODING_DIM, 
+                        help='Dimension of the encoded state z_t from the encoder')
+    parser.add_argument('--num_actions', type=int, default=DEFAULT_NUM_ACTIONS, 
+                        help='Number of discrete actions for the policy network')
+    parser.add_argument('--encoder_embedding_dim', type=int, default=256, 
+                        help='Internal embedding dimension for ViT encoder or similar usage in CNN')
+    parser.add_argument('--encoder_type', type=str, default='vit', choices=['vit','cnn'], 
+                        help='Encoder architecture: vit or cnn')
+    parser.add_argument('--policy_temperature', type=float, default=1.0, 
+                        help='Temperature for policy network action sampling; replaces next_goal_temp')
+
     # Training parameters
     parser.add_argument('--epochs', type=int, default=60, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=200, help='Maximum steps per episode')
-    parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
-    parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm')
+    parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm for action grid')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
     parser.add_argument('--log_steps', type=int, default=9999999999, help='Logging frequency for gradient statistics')
     parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
-    parser.add_argument('--use_quadrant', action='store_true', default=True, help='Use quadrant-based action sampling (True) or full action space sampling (False)')
-
     parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
@@ -1035,12 +1034,8 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value5143', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_pldm_refactored', help='Directory to save model and logs') # Updated default
     parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
-    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
-    parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
-    #parser.add_argument('--base_reward', type=float, default=1.0, help='Base reward for each step')
-    parser.add_argument('--search_mode', type=str, default='rl', choices=['pldm','rl'], help='Action search mode: pldm or rl')
     parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
 
     # Add a new argument to choose between immediate rewards and discounted returns

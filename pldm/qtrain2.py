@@ -1020,7 +1020,7 @@ def parse_args():
     parser.add_argument('--encoder_type', type=str, default='vit', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=60, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=200, help='Maximum steps per episode')
@@ -1063,7 +1063,7 @@ def parse_args():
 
     # Add a new argument to choose between immediate rewards and discounted returns
     parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
-    parser.add_argument('--use_kl_loss', action='store_true', default=False, help='Use KL loss for dynamics model')
+    parser.add_argument('--use_kl_loss', action='store_true', default=True, help='Use KL loss for dynamics model')
     return parser.parse_args()
 
 
