@@ -113,7 +113,7 @@ class CNNEncoder(nn.Module):
         B = x.size(0)
         out   = self.conv(x).view(B, -1)
         logits = self.projection(out)
-        return logits
+        return F.softmax(logits / self.temperature, dim=-1)      # returns prob-vector
 
 
 
@@ -237,7 +237,10 @@ class NextGoalPredictor(nn.Module):
         return F.softmax(logits / self.temperature, dim=-1)
 
     def value(self, z_t):
-        return self.value_mlp(z_t).squeeze(-1)
+        #return self.value_mlp(z_t).squeeze(-1)
+        raw_value = self.value_mlp(z_t).squeeze(-1)
+        return 50.0 * torch.tanh(raw_value / 50.0)
+
 
     def log_prob(self, z_t, z_sample):
         dist = Categorical(logits=self.output_proj(self._features(z_t)) / self.temperature)

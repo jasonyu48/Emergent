@@ -27,7 +27,7 @@ except Exception:
     pass
 
 from pldm_envs.wall.wall import DotWall
-from pldm.qmodel import PLDMModel
+from pldm.qmodel2 import PLDMModel
 
 # ----------  NEW: helper to remove NaN / Inf & clip  ----------
 def _sanitize_pos(pos: torch.Tensor, max_x: float, max_y: float):
@@ -757,7 +757,11 @@ def train_pldm(args):
 
                 # Value prediction
                 V_pred = model.next_goal_predictor.value(Z_t) #grad flow from value head
-                V_pred = torch.clamp(V_pred, -20.0, 20.0)        # 限定数值范围
+                if global_step % args.log_steps == 0:
+                     writer.add_scalar('Value/mean_pred', V_pred.mean().item(), global_step)
+                     writer.add_scalar('Value/std_pred', V_pred.std().item(), global_step)
+                # Soft clamp value prediction to preserve mean behavior
+                V_pred = 50.0 * torch.tanh(V_pred / 50.0)
                 V_pred = torch.nan_to_num(
                     V_pred,
                     nan=0.0, posinf=20.0, neginf=-20.0
@@ -770,7 +774,7 @@ def train_pldm(args):
                 # Dynamics prediction
                 if args.mode == 'RL':
                     # print("RL mode")
-                    Z_next_pred = model.dynamics(Z_t.detach(),A_t) # Control the grad flow of the world model
+                    Z_next_pred = model.dynamics(Z_t.detach(), A_t)
                 else:
                     # print("JEPA mode")
                     Z_next_pred = model.dynamics(Z_t,A_t) 
@@ -778,9 +782,21 @@ def train_pldm(args):
                 # KL divergence between predicted and target probability distributions
                 eps = 1e-8
                 if args.mode == 'RL':
-                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
+                    if args.use_kl_loss:
+                        pred_prob = F.log_softmax(Z_next_pred, dim=-1)  # [B, NUM_CODES]
+                        target_prob = F.softmax(Z_next_actual.detach(), dim=-1)  # no grad from target
+                        dynamics_loss = F.kl_div(pred_prob, target_prob, reduction='batchmean')
+                        writer.add_scalar('Loss/kl_dynamics', dynamics_loss.item(), global_step)
+                    else:
+                        dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
                 else:
-                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual)  #grad flow from the world model
+                    if args.use_kl_loss:
+                        pred_prob = F.log_softmax(Z_next_pred, dim=-1)  # [B, NUM_CODES]
+                        target_prob = F.softmax(Z_next_actual, dim=-1)  # no grad from target
+                        dynamics_loss = F.kl_div(pred_prob, target_prob, reduction='batchmean')
+                        writer.add_scalar('Loss/kl_dynamics', dynamics_loss.item(), global_step)
+                    else:
+                        dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual)  #grad flow from the world model
 
                 # ------------------------------------------------------------------
                 #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
@@ -846,6 +862,7 @@ def train_pldm(args):
                 encoder_params_list = [p for p in model.encoder.parameters() if p.requires_grad]
                 loss_contributions = {
                     'policy': args.lambda_policy * policy_loss,
+                    # consider lowering lambda_dynamics to ~0.1 to allow more encoder learning from policy gradients
                     'dynamics': args.lambda_dynamics * dynamics_loss,
                     'entropy': - args.lambda_entropy * entropy,
                 }
@@ -910,6 +927,7 @@ def train_pldm(args):
             # Epoch statistics
             if num_episodes > 0:
                 avg_reward = total_reward / num_episodes
+                writer.add_scalar('Reward/epoch_avg', avg_reward, epoch)
                 avg_policy_loss = total_policy_loss / num_episodes
                 avg_dynamics_loss = total_dynamics_loss / num_episodes
                 
@@ -1002,11 +1020,11 @@ def parse_args():
     parser.add_argument('--encoder_type', type=str, default='vit', choices=['vit','cnn'], help='Encoder architecture: vit or cnn')
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=60, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
     parser.add_argument('--max_steps_per_episode', type=int, default=200, help='Maximum steps per episode')
-    parser.add_argument('--num_samples', type=int, default=8, help='Number of action samples to evaluate in parallel')
+    parser.add_argument('--num_samples', type=int, default=128, help='Number of action samples to evaluate in parallel')
     parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
@@ -1020,13 +1038,13 @@ def parse_args():
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=100.0, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1e-2, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=0.5, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_policy', type=float, default=1.0, help='Weight for policy loss')
+    parser.add_argument('--lambda_value', type=float, default=0.5, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
-    parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
+    parser.add_argument('--lambda_entropy', type=float, default=1.0, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
-    parser.add_argument('--encoder_lr', type=float, default=3e-6, help='Learning rate for encoder')
+    parser.add_argument('--encoder_lr', type=float, default=1e-5, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=1e-5, help='Learning rate for dynamics model')
     parser.add_argument('--policy_lr', type=float, default=3e-5, help='Learning rate for policy')
     parser.add_argument('--value_lr', type=float, default=3e-5, help='Learning rate for value')
@@ -1035,7 +1053,7 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_same_page_value5143', help='Directory to save model and logs')
+    parser.add_argument('--output_dir', type=str, default='output_same_page_value51510', help='Directory to save model and logs')
     parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for discrete softmax')
     parser.add_argument('--next_goal_temp', type=float, default=1.0, help='Temperature for next-goal predictor; if not set, uses --temperature')
@@ -1045,7 +1063,7 @@ def parse_args():
 
     # Add a new argument to choose between immediate rewards and discounted returns
     parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
-
+    parser.add_argument('--use_kl_loss', action='store_true', default=False, help='Use KL loss for dynamics model')
     return parser.parse_args()
 
 

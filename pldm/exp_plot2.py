@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Constants
 NUM_TRIALS = 2
-OUTPUT_DIR = Path('output4')
+OUTPUT_DIR = Path('output516')
 
 # Function to run qtrain.py with specified mode
 def run_qtrain():
@@ -13,14 +13,14 @@ def run_qtrain():
         mode = 'JEPA'
         print(f"Running trial {i+1}/{NUM_TRIALS} for {mode} mode...")
         subprocess.run([
-            'python', 'pldm/qtrain.py',
+            'python', 'pldm/qtrain2.py',
             '--mode', str(mode),
             '--output_dir', str(OUTPUT_DIR / f'{mode}_trial_{i+1}')
         ])
         mode = 'RL'
         print(f"Running trial {i+1}/{NUM_TRIALS} for {mode} mode...")
         subprocess.run([
-            'python', 'pldm/qtrain.py',
+            'python', 'pldm/qtrain2.py',
             '--mode', str(mode),
             '--output_dir', str(OUTPUT_DIR / f'{mode}_trial_{i+1}')
         ])
