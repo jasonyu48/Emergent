@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Constants
-NUM_TRIALS = 5
-OUTPUT_DIR = Path('output516_small_model2')
+NUM_TRIALS = 10
+OUTPUT_DIR = Path('output516_small_model_noise')
 
 # Function to run qtrain.py with specified mode
 def run_qtrain():

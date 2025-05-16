@@ -308,7 +308,17 @@ def evaluate_model(model_path_str: str, output_dir_str:str ='test_output', devic
     pldm_max_step_norm = train_args.get('max_step_norm', 15.0)
     env_max_step_norm = eval_max_step_norm if eval_max_step_norm is not None else pldm_max_step_norm
 
-    env = DotWall(max_step_norm=env_max_step_norm, door_space=8)
+    # Observation noise: prioritize CLI, then train_args, then default 0.0
+    obs_noise_std_to_use = args.obs_noise_std # Comes from qtest CLI args
+    if obs_noise_std_to_use == 0.0 and 'obs_noise_std' in train_args: # If CLI is default and train_args has it
+        obs_noise_std_to_use = train_args.get('obs_noise_std', 0.0)
+    print(f"Using observation noise std: {obs_noise_std_to_use}")
+
+    env = DotWall(
+        max_step_norm=env_max_step_norm, 
+        door_space=8,
+        obs_noise_std=obs_noise_std_to_use # Pass determined noise std to env
+    )
 
     print(f"Loading model from {model_path}")
     checkpoint = torch.load(model_path, map_location=device)
@@ -419,13 +429,16 @@ def evaluate_model(model_path_str: str, output_dir_str:str ='test_output', devic
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Test PLDM model on DotWall environment')
-    parser.add_argument('--model_path', type=str, default='output_pldm_refactored/best_model.pt')
-    parser.add_argument('--output_dir', type=str, default='output_pldm_refactored_test')
+    parser.add_argument('--model_path', type=str, default='output_pldm_noise/best_model.pt')
+    parser.add_argument('--output_dir', type=str, default='output_pldm_noise')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--num_episodes', type=int, default=10)
-    parser.add_argument('--max_steps', type=int, default=200)
+    parser.add_argument('--max_steps', type=int, default=64)
     parser.add_argument('--eval_max_step_norm', type=float, default=None, 
                         help='Max step norm for DotWall env during evaluation. If None, uses value from training config.')
+    # Argument for observation noise for testing
+    parser.add_argument('--obs_noise_std', type=float, default=0.1, 
+                        help='Standard deviation of Gaussian noise for observations during testing. Overrides training setting if specified. Default 0.03.')
     return parser.parse_args()
 
 

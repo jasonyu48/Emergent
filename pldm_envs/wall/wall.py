@@ -30,6 +30,7 @@ class DotWall(gym.Env):
         device: Optional[torch.device] = None,
         fix_wall_location: Optional[int] = 32,
         fix_door_location: Optional[int] = 10,
+        obs_noise_std: float = 0.0
     ):
         super().__init__()
         self.cross_wall = cross_wall
@@ -49,6 +50,7 @@ class DotWall(gym.Env):
         self.n_steps = n_steps
         self.action_step_mean = action_step_mean
         self.rng = rng or np.random.default_rng()
+        self.obs_noise_std = obs_noise_std
 
         self.action_space = gym.spaces.Box(
             low=-max_step_norm, high=max_step_norm, shape=(2,), dtype=np.float32
@@ -85,8 +87,16 @@ class DotWall(gym.Env):
         self.position_history = [self.dot_position]
         obs = self._render_dot_and_wall()
         info = self._build_info()
+
         if obs.max() > 1.0:
             obs = obs / 255.0
+        obs = obs.float()
+
+        if self.obs_noise_std > 0 and self.obs_noise_std is not None:
+            noise = torch.randn_like(obs) * self.obs_noise_std
+            obs = obs + noise
+            obs = torch.clamp(obs, 0.0, 1.0)
+
         return obs, info
 
     def _build_info(self) -> InfoType:
@@ -109,8 +119,16 @@ class DotWall(gym.Env):
         obs = self._render_dot_and_wall()
         done = (self.dot_position - self.target_position).pow(2).mean() < 1.0
         truncated = len(self.position_history) >= self.n_steps
+        
         if obs.max() > 1.0:
             obs = obs / 255.0
+        obs = obs.float()
+
+        if self.obs_noise_std > 0 and self.obs_noise_std is not None:
+            noise = torch.randn_like(obs) * self.obs_noise_std
+            obs = obs + noise
+            obs = torch.clamp(obs, 0.0, 1.0)
+
         return obs, 0.0, done, truncated, self._build_info()
 
     def _calculate_next_position(self, action):

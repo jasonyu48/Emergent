@@ -480,7 +480,11 @@ def train_pldm(args):
     
     # Environment creation function for parallel workers
     def create_env():
-        return DotWall(max_step_norm=args.max_step_norm, door_space=8)
+        return DotWall(
+            max_step_norm=args.max_step_norm, 
+            door_space=8,
+            obs_noise_std=args.obs_noise_std # Pass noise std to env
+        )
     
     # Create initial environment for the main thread
     env = create_env()
@@ -995,12 +999,12 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=60, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
-    parser.add_argument('--max_steps_per_episode', type=int, default=100, help='Maximum steps per episode')
+    parser.add_argument('--max_steps_per_episode', type=int, default=64, help='Maximum steps per episode')
     parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm for action grid')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=64, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=999999, help='Logging frequency for gradient statistics')
     parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
@@ -1029,12 +1033,15 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_pldm_refactored', help='Directory to save model and logs') # Updated default
+    parser.add_argument('--output_dir', type=str, default='output_pldm_noise', help='Directory to save model and logs') # Updated default
     parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
     parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
 
     # Add a new argument to choose between immediate rewards and discounted returns
     parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
+
+    # Argument for observation noise
+    parser.add_argument('--obs_noise_std', type=float, default=0.1, help='Standard deviation of Gaussian noise to add to observations.')
 
     return parser.parse_args()
 
