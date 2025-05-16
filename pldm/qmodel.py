@@ -337,7 +337,7 @@ class PLDMModel(nn.Module):
         
         self.decoder = Decoder(encoding_dim=self.encoding_dim,
                                img_size=img_size,
-                               in_channels=in_channels)
+                               out_channels=in_channels)
 
     # ------------------------------------------------------------
     def encode(self, s_t):

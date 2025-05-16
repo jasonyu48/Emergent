@@ -29,18 +29,6 @@ except Exception:
 from pldm_envs.wall.wall import DotWall
 from pldm.qmodel import PLDMModel, DEFAULT_ENCODING_DIM, DEFAULT_NUM_ACTIONS
 
-# ----------  NEW: helper to remove NaN / Inf & clip  ----------
-def _sanitize_pos(pos: torch.Tensor, max_x: float, max_y: float):
-    """
-    1) 把 NaN 统一变 0；把 ±Inf 钳到边界；
-    2) 最后再 clamp 到合法范围，确保坐标永远是有限数。
-    """
-    pos = torch.nan_to_num(pos, nan=0.0, posinf=max_x, neginf=0.0)
-    pos[..., 0].clamp_(0.0, max_x)
-    pos[..., 1].clamp_(0.0, max_y)
-    return pos
-# --------------------------------------------------------------
-
 #---------restrict_action 函数：这个函数会检查小球的当前位置和墙壁的位置，并根据当前方向限制动作。
 def restrict_action(action, env, direction='right'):
     # 限制小球不能超出左墙和右墙的边界
@@ -524,7 +512,6 @@ def train_pldm(args):
         {'params': model.dynamics_model.parameters(),      'lr': args.dynamics_lr},
         {'params': policy_params,                        'lr': args.policy_lr},
         {'params': value_params,                         'lr': args.value_lr},
-        {'params': model.decoder.parameters(),           'lr': args.decoder_lr},
     ])
     
     # Create learning rate schedulers
@@ -536,7 +523,7 @@ def train_pldm(args):
         dynamics_lr = optimizer.param_groups[1]['lr']
         policy_lr   = optimizer.param_groups[2]['lr']
         value_lr    = optimizer.param_groups[3]['lr']
-        decoder_lr  = optimizer.param_groups[4]['lr']
+        # decoder_lr  = optimizer.param_groups[4]['lr']
         
         # # Apply encoder LR schedule: reduce to 1/3 after the first epoch
         # if epoch == 1:
@@ -551,9 +538,9 @@ def train_pldm(args):
         optimizer.param_groups[1]['lr'] = dynamics_lr
         optimizer.param_groups[2]['lr'] = policy_lr
         optimizer.param_groups[3]['lr'] = value_lr
-        optimizer.param_groups[4]['lr'] = decoder_lr
+        # optimizer.param_groups[4]['lr'] = decoder_lr
         
-        return encoder_lr, dynamics_lr, policy_lr, value_lr, decoder_lr
+        return encoder_lr, dynamics_lr, policy_lr, value_lr #, decoder_lr
     
     # Check if resume from checkpoint
     start_epoch = 0
@@ -622,17 +609,17 @@ def train_pldm(args):
             num_episodes = 0
 
             # Adjust learning rates for this epoch
-            encoder_lr, dynamics_lr, policy_lr, value_lr, decoder_lr = adjust_learning_rates(epoch)
+            encoder_lr, dynamics_lr, policy_lr, value_lr = adjust_learning_rates(epoch)
 
             # Log current learning rates
             print(f"Epoch {epoch+1}/{args.epochs} - Learning rates: Encoder={encoder_lr:.2e}, "
-                  f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Value={value_lr:.2e}, Decoder={decoder_lr:.2e}")
+                  f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Value={value_lr:.2e}")
                   
             writer.add_scalar('LearningRate/encoder', encoder_lr, epoch)
             writer.add_scalar('LearningRate/dynamics', dynamics_lr, epoch)
             writer.add_scalar('LearningRate/policy', policy_lr, epoch)
             writer.add_scalar('LearningRate/value', value_lr, epoch)
-            writer.add_scalar('LearningRate/decoder', decoder_lr, epoch)
+            # writer.add_scalar('LearningRate/decoder', decoder_lr, epoch)
 
             # ------------------------------------------------------------------
             # We now define an *update* as a gradient step computed from
@@ -718,7 +705,7 @@ def train_pldm(args):
                     batch_returns_tensor = (batch_returns_tensor - mean_R) / std_R
                 batch_returns_tensor = torch.nan_to_num(
                     batch_returns_tensor,
-                    nan=0.0, posinf=0.0, neginf=0.0
+                    nan=0.0, posinf=10000.0, neginf=-10000.0
                 )
 
                 # --------------------------------------------------------
@@ -752,15 +739,11 @@ def train_pldm(args):
 
                 # Value prediction
                 V_pred = model.get_value_prediction(Z_t) #grad flow from value head
-                V_pred = torch.clamp(V_pred, -20.0, 20.0)        # 限定数值范围
+                # V_pred = torch.clamp(V_pred, -20.0, 20.0)        # 限定数值范围
                 V_pred = torch.nan_to_num(
                     V_pred,
-                    nan=0.0, posinf=20.0, neginf=-20.0
+                    nan=0.0, posinf=10000.0, neginf=-10000.0
                 )
-                if not torch.isfinite(V_pred).all():
-                    print(f"[WARN step={global_step}] NaN/Inf detected in V_pred — auto-fix to 0")
-                    V_pred = torch.nan_to_num(V_pred, nan=0.0, posinf=0.0, neginf=0.0)
-                    value_loss = F.smooth_l1_loss(V_pred_safe, batch_returns_tensor)
 
                 # Dynamics prediction (uses continuous actions)
                 if args.mode == 'RL':
@@ -818,7 +801,7 @@ def train_pldm(args):
                 if torch.isnan(value_loss):
                     print(f"[WARN step={global_step}] NaN in value_loss — 重新计算")
                      # 强制把 V_pred 再次钳位后重算
-                    V_pred_safe = torch.clamp(torch.nan_to_num(V_pred), -20.0, 20.0)
+                    V_pred_safe = torch.clamp(torch.nan_to_num(V_pred), -10000.0, 10000.0)
                     value_loss = F.smooth_l1_loss(V_pred_safe, batch_returns_tensor)
 
                 if args.lambda_entropy > 0:
@@ -865,12 +848,17 @@ def train_pldm(args):
 
                 # Optimizer step
                 loss.backward()
-                # First, clip gradients on the value head a bit harder — it is
-                # the most common source of exploding weights.
-                torch.nn.utils.clip_grad_norm_(model.policy_value_network.value_mlp.parameters(), max_norm=0.1)
 
-                # Then clip the entire model to a reasonable global norm.
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # Clip gradients for each parameter group
+                if args.clip_grad_encoder_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=args.clip_grad_encoder_norm)
+                if args.clip_grad_dynamics_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(optimizer.param_groups[1]['params'], max_norm=args.clip_grad_dynamics_norm)
+                if args.clip_grad_policy_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(optimizer.param_groups[2]['params'], max_norm=args.clip_grad_policy_norm)
+                if args.clip_grad_value_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(optimizer.param_groups[3]['params'], max_norm=args.clip_grad_value_norm)
+                
                 optimizer.step()
                 if global_step % args.log_steps == 0:
                     _log_grad_update_stats(model, optimizer, global_step)
@@ -1007,29 +995,36 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=60, help='Number of training epochs')
     parser.add_argument('--updates_per_epoch', type=int, default=32, help='Number of training updates (batches of transitions) per epoch')
     parser.add_argument('--batch_size', type=int, default=32, help='Number of trajectories to process in a batch')
-    parser.add_argument('--max_steps_per_episode', type=int, default=200, help='Maximum steps per episode')
+    parser.add_argument('--max_steps_per_episode', type=int, default=100, help='Maximum steps per episode')
     parser.add_argument('--gamma', type=float, default=0.9, help='Discount factor')
     parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm for action grid')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=9999999999, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=99999, help='Logging frequency for gradient statistics')
     parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=100.0, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1e-2, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=1e-3, help='Weight for value loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_policy', type=float, default=1e-1, help='Weight for policy loss')
+    parser.add_argument('--lambda_value', type=float, default=1e-2, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
     parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
-    parser.add_argument('--encoder_lr', type=float, default=3e-6, help='Learning rate for encoder')
-    parser.add_argument('--dynamics_lr', type=float, default=1e-5, help='Learning rate for dynamics model')
-    parser.add_argument('--policy_lr', type=float, default=3e-5, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=3e-5, help='Learning rate for value')
+    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
+    parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
+    parser.add_argument('--policy_lr', type=float, default=1e-4, help='Learning rate for policy')
+    parser.add_argument('--value_lr', type=float, default=3e-4, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
+
+    # Gradient clipping norms per parameter group
+    parser.add_argument('--clip_grad_encoder_norm', type=float, default=1.0, help='Max grad norm for encoder parameters')
+    parser.add_argument('--clip_grad_dynamics_norm', type=float, default=1.0, help='Max grad norm for dynamics model parameters')
+    parser.add_argument('--clip_grad_policy_norm', type=float, default=1.0, help='Max grad norm for policy network (excluding value head) parameters')
+    parser.add_argument('--clip_grad_value_norm', type=float, default=1.0, help='Max grad norm for value head parameters')
+    parser.add_argument('--clip_grad_decoder_norm', type=float, default=-1.0, help='Max grad norm for decoder parameters (not used)')
     
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
