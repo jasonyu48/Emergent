@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Constants
 NUM_TRIALS = 5
-OUTPUT_DIR = Path('output516_small_model')
+OUTPUT_DIR = Path('output516_small_model2')
 
 # Function to run qtrain.py with specified mode
 def run_qtrain():
