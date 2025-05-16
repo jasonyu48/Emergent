@@ -1009,14 +1009,14 @@ def parse_args():
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e-1, help='Weight for policy loss')
-    parser.add_argument('--lambda_value', type=float, default=1e-2, help='Weight for value loss')
+    parser.add_argument('--lambda_value', type=float, default=5e-2, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
     parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be larger than 1e-3 for numerical stability
 
     parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
     parser.add_argument('--policy_lr', type=float, default=1e-4, help='Learning rate for policy')
-    parser.add_argument('--value_lr', type=float, default=1e-3, help='Learning rate for value')
+    parser.add_argument('--value_lr', type=float, default=1e-4, help='Learning rate for value')
     parser.add_argument('--decoder_lr', type=float, default=1e-1, help='Learning rate for decoder')
 
     # Gradient clipping norms per parameter group
