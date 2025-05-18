@@ -115,7 +115,7 @@ def evaluate_representation(model, env_creator, device,
 
     # Decode probe (z -> pos)
     lin_dec = torch.nn.Linear(Z.size(1), 4, bias=True).to(device)
-    opt_dec = torch.optim.SGD(lin_dec.parameters(), lr=1e-2, momentum=0.9)
+    opt_dec = torch.optim.SGD(lin_dec.parameters(), lr=5e-3, momentum=0.9)
     for _ in range(train_steps):
         b = torch.randint(0, split, (batch_size,), device=device)
         loss = mse(lin_dec(Z_tr[b]), P_tr[b])
@@ -125,7 +125,7 @@ def evaluate_representation(model, env_creator, device,
 
     # Encode probe (pos -> z)
     lin_enc = torch.nn.Linear(4, Z.size(1), bias=True).to(device)
-    opt_enc = torch.optim.SGD(lin_enc.parameters(), lr=1e-2, momentum=0.9)
+    opt_enc = torch.optim.SGD(lin_enc.parameters(), lr=5e-3, momentum=0.9)
     for _ in range(train_steps):
         b = torch.randint(0, split, (batch_size,), device=device)
         loss = mse(lin_enc(P_tr[b]), Z_tr[b])
@@ -682,8 +682,7 @@ def train_pldm(args):
             encoder_lr, dynamics_lr, policy_lr, value_lr = adjust_learning_rates(epoch)
 
             # Log current learning rates
-            print(f"Epoch {epoch+1}/{args.epochs} - Learning rates: Encoder={encoder_lr:.2e}, "
-                  f"Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Value={value_lr:.2e}")
+            # print(f"Epoch {epoch+1}/{args.epochs} - Learning rates: Encoder={encoder_lr:.2e}, Dynamics={dynamics_lr:.2e}, Policy={policy_lr:.2e}, Value={value_lr:.2e}")
                   
             writer.add_scalar('LearningRate/encoder', encoder_lr, epoch)
             writer.add_scalar('LearningRate/dynamics', dynamics_lr, epoch)
@@ -1058,6 +1057,18 @@ def train_pldm(args):
                 for reward in epoch_rewards_history:
                     f.write(f"{reward}\n")
         
+            # Save probe evaluation history
+            if probe_steps_history: # Check if any probe data was collected
+                with open(output_dir / "probe_steps_history.txt", "w") as f:
+                    for step_val in probe_steps_history:
+                        f.write(f"{step_val}\n")
+                with open(output_dir / "decode_mse_history.txt", "w") as f:
+                    for mse_val in decode_mse_history:
+                        f.write(f"{mse_val}\n")
+                with open(output_dir / "encode_mse_history.txt", "w") as f:
+                    for mse_val in encode_mse_history:
+                        f.write(f"{mse_val}\n")
+
         writer.close()
         
     finally:
@@ -1092,18 +1103,18 @@ def parse_args():
     parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm for action grid')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=128, help='Logging frequency for gradient statistics')
-    parser.add_argument('--heatmap', action='store_false', default=True, help='Save a heatmap of Z_t')
+    parser.add_argument('--log_steps', type=int, default=999999, help='Logging frequency for gradient statistics')
+    parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1e4, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e-1, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-2, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
-    parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be too small otherwise the policy will be constant
+    parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be smaller than 0.1 otherwise the policy will be constant
 
     parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
@@ -1121,15 +1132,15 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_RL', help='Directory to save model and logs') # Updated default
+    parser.add_argument('--output_dir', type=str, default='output_JEPA_1e4jepa_noisy', help='Directory to save model and logs') # Updated default
     parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
-    parser.add_argument('--mode', type=str, default='RL', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
+    parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
 
     # Add a new argument to choose between immediate rewards and discounted returns
     parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
 
     # Argument for observation noise
-    parser.add_argument('--obs_noise_std', type=float, default=0.0, help='Standard deviation of Gaussian noise to add to observations.')
+    parser.add_argument('--obs_noise_std', type=float, default=0.1, help='Standard deviation of Gaussian noise to add to observations.')
 
     # -------------------------------------------------------------------------
     #  Representation probe evaluation parameters
@@ -1138,7 +1149,7 @@ def parse_args():
                         help='Run linear-probe evaluation every N global steps (0 disables probing).')
     parser.add_argument('--probe_num_samples', type=int, default=1024,
                         help='Number of random environment states sampled for each probe evaluation.')
-    parser.add_argument('--probe_train_steps', type=int, default=200,
+    parser.add_argument('--probe_train_steps', type=int, default=2000,
                         help='SGD steps to train each linear probe during evaluation.')
     parser.add_argument('--probe_batch_size', type=int, default=128,
                         help='Mini-batch size during probe training.')
