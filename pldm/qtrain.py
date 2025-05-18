@@ -73,6 +73,69 @@ def compute_returns(rewards, gamma=0.99):
 
     return returns
 
+# -----------------------------------------------------------------------------
+#  Representation probing utilities
+# -----------------------------------------------------------------------------
+
+def evaluate_representation(model, env_creator, device,
+                             num_samples: int = 1024,
+                             train_steps: int = 200,
+                             batch_size: int = 128):
+    """Evaluate how linearly the latent space represents positional information.
+
+    Returns a dict with keys 'decode_mse' and 'encode_mse'. Lower is better.
+    """
+    was_training = model.training
+    model.eval()
+
+    env = env_creator()
+    z_list, p_list = [], []
+    with torch.no_grad():
+        for _ in range(num_samples):
+            obs, info = env.reset()
+            pos_vec = torch.stack([
+                info['dot_position'][0], info['dot_position'][1],
+                info['target_position'][0], info['target_position'][1]
+            ]).to(device, dtype=torch.float32)
+            obs_t = (obs if isinstance(obs, torch.Tensor) else torch.tensor(obs, dtype=torch.float32)).unsqueeze(0).to(device)
+            z = model.encode(obs_t).squeeze(0).detach()
+            z_list.append(z)
+            p_list.append(pos_vec)
+    Z = torch.stack(z_list)  # [N,D]
+    P = torch.stack(p_list)  # [N,4]
+
+    N = Z.size(0)
+    idx = torch.randperm(N, device=device)
+    split = int(0.8 * N)
+    tr, val = idx[:split], idx[split:]
+    Z_tr, Z_val = Z[tr], Z[val]
+    P_tr, P_val = P[tr], P[val]
+
+    mse = torch.nn.MSELoss()
+
+    # Decode probe (z -> pos)
+    lin_dec = torch.nn.Linear(Z.size(1), 4, bias=True).to(device)
+    opt_dec = torch.optim.SGD(lin_dec.parameters(), lr=1e-2, momentum=0.9)
+    for _ in range(train_steps):
+        b = torch.randint(0, split, (batch_size,), device=device)
+        loss = mse(lin_dec(Z_tr[b]), P_tr[b])
+        opt_dec.zero_grad(); loss.backward(); opt_dec.step()
+    with torch.no_grad():
+        decode_mse = mse(lin_dec(Z_val), P_val).item()
+
+    # Encode probe (pos -> z)
+    lin_enc = torch.nn.Linear(4, Z.size(1), bias=True).to(device)
+    opt_enc = torch.optim.SGD(lin_enc.parameters(), lr=1e-2, momentum=0.9)
+    for _ in range(train_steps):
+        b = torch.randint(0, split, (batch_size,), device=device)
+        loss = mse(lin_enc(P_tr[b]), Z_tr[b])
+        opt_enc.zero_grad(); loss.backward(); opt_enc.step()
+    with torch.no_grad():
+        encode_mse = mse(lin_enc(P_val), Z_val).item()
+
+    if was_training:
+        model.train()
+    return {'decode_mse': decode_mse, 'encode_mse': encode_mse}
 
 def rollout(model, env, max_steps: int = 100, device: str = "cpu", num_samples: int = 100, use_quadrant: bool = True):
     """
@@ -573,6 +636,9 @@ def train_pldm(args):
     # Create tensorboard writer
     writer = SummaryWriter(log_dir=str(output_dir / 'logs'))
     epoch_rewards_history = []  # store avg reward for each epoch
+    probe_steps_history = []    # store global_step for probe plot
+    decode_mse_history = []   # store decode_mse for probe plot
+    encode_mse_history = []   # store encode_mse for probe plot
     
     # Determine number of data loader workers based on CPU cores
     num_workers = min(args.num_workers if hasattr(args, 'num_workers') else 4, max(1, (multiprocessing.cpu_count() - 1) // 2))
@@ -733,7 +799,7 @@ def train_pldm(args):
                     # save a heatmap of Z_t, make the heat map larger
                     plt.figure(figsize=(10, 10))
                     plt.imshow(Z_t.cpu().detach().numpy())
-                    plt.savefig(f"{args.output_dir}/heatmap_{global_step}.png")
+                    plt.savefig(f"{args.output_dir}/heatmap_Z_{global_step}.png")
                     plt.close()
 
                 Z_next_actual = model.encode(S_next)
@@ -775,14 +841,17 @@ def train_pldm(args):
                     tqdm.write(
                          f"[LatentStats step={global_step}] ||z_t||={avg_mag_z_t:.3f} ||z_next_pred||={avg_mag_z_next_pred:.3f} ||action_one_hot||={avg_mag_action_one_hot:.3f}"
                     )
-
-                    # Count distinct discrete codes in this batch
-                    z_codes = Z_t.argmax(dim=1) if Z_t.shape[-1] > 1 and Z_t.is_floating_point() else Z_t # Handle if Z_t is already codes
-                    # Action_OneHot_Batch is already one-hot, convert to indices for unique count
-                    action_indices_batch = Action_OneHot_Batch.argmax(dim=1) 
-                    num_z_codes = int(torch.unique(z_codes).numel())
-                    num_action_indices = int(torch.unique(action_indices_batch).numel())
-                    tqdm.write(f"[CodeStats step={global_step}] encoder_codes={num_z_codes} | policy_action_indices={num_action_indices}")
+                    # count the number of unique encoding vectors and most likely actions in the batch
+                    num_z = int(torch.unique(Z_t, dim=0).size(0))
+                    num_actions = int(torch.unique(Action_OneHot_Batch, dim=0).size(0))
+                    tqdm.write(f"[CodeStats step={global_step}] num_encoding_vec={num_z} | num_most_likely_actions_in_batch={num_actions}")
+                    if args.heatmap:
+                        # save a heatmap of action distribution
+                        action_distribution = model.get_action_distribution_probs(Z_t)
+                        plt.figure(figsize=(10, 10))
+                        plt.imshow(action_distribution.cpu().detach().numpy())
+                        plt.savefig(f"{args.output_dir}/heatmap_action_distribution_{global_step}.png")
+                        plt.close()
 
                 if args.use_same_page_loss:
                     on_the_same_page_loss = torch.tensor(0.0, device=device)
@@ -890,6 +959,38 @@ def train_pldm(args):
 
                 # ----------------------------------------------------------------
                 global_step += 1
+                # ----- Linear-probe evaluation -----
+                if args.probe_eval_interval > 0 and (global_step % args.probe_eval_interval == 0):
+                    probe_metrics = evaluate_representation(
+                        model,
+                        create_env,
+                        device,
+                        num_samples=args.probe_num_samples,
+                        train_steps=args.probe_train_steps,
+                        batch_size=args.probe_batch_size,
+                    )
+                    writer.add_scalar('Probe/Decode_MSE', probe_metrics['decode_mse'], global_step)
+                    writer.add_scalar('Probe/Encode_MSE', probe_metrics['encode_mse'], global_step)
+                    tqdm.write(f"[Probe step={global_step}] decode_mse={probe_metrics['decode_mse']:.4f} | encode_mse={probe_metrics['encode_mse']:.4f}")
+
+                    # Append data for plotting
+                    probe_steps_history.append(global_step)
+                    decode_mse_history.append(probe_metrics['decode_mse'])
+                    encode_mse_history.append(probe_metrics['encode_mse'])
+
+                    # Generate and save the plot
+                    if probe_steps_history:
+                        plt.figure(figsize=(10, 6))
+                        plt.plot(probe_steps_history, decode_mse_history, marker='o', linestyle='-', label='Decode MSE')
+                        plt.plot(probe_steps_history, encode_mse_history, marker='x', linestyle='--', label='Encode MSE')
+                        plt.title('Probe MSEs vs Global Step')
+                        plt.xlabel('Global Step')
+                        plt.ylabel('MSE')
+                        plt.legend()
+                        plt.grid(True)
+                        plt.tight_layout()
+                        plt.savefig(output_dir / "probe_metrics_vs_step.png")
+                        plt.close()
                 update_idx += 1
                 progress_bar.update(1)
 
@@ -957,19 +1058,6 @@ def train_pldm(args):
                 for reward in epoch_rewards_history:
                     f.write(f"{reward}\n")
         
-        # -------------------------------------------------------------
-        # Plot Avg‑Reward vs Epoch curve and save as PNG
-        # -------------------------------------------------------------
-        if epoch_rewards_history:
-            plt.figure(figsize=(6,4))
-            plt.plot(epoch_rewards_history, marker='o')
-            plt.title("Average Reward vs Epoch")
-            plt.xlabel("Epoch")
-            plt.ylabel("Avg Reward")
-            plt.grid(True)
-            plt.tight_layout()
-            plt.savefig(output_dir / "avg_reward_curve_final.png")
-            plt.close()
         writer.close()
         
     finally:
@@ -1004,8 +1092,8 @@ def parse_args():
     parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm for action grid')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=999999, help='Logging frequency for gradient statistics')
-    parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
+    parser.add_argument('--log_steps', type=int, default=128, help='Logging frequency for gradient statistics')
+    parser.add_argument('--heatmap', action='store_false', default=True, help='Save a heatmap of Z_t')
     parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
@@ -1033,15 +1121,27 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_pldm_noise', help='Directory to save model and logs') # Updated default
+    parser.add_argument('--output_dir', type=str, default='output_RL', help='Directory to save model and logs') # Updated default
     parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
-    parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
+    parser.add_argument('--mode', type=str, default='RL', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
 
     # Add a new argument to choose between immediate rewards and discounted returns
     parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
 
     # Argument for observation noise
-    parser.add_argument('--obs_noise_std', type=float, default=0.1, help='Standard deviation of Gaussian noise to add to observations.')
+    parser.add_argument('--obs_noise_std', type=float, default=0.0, help='Standard deviation of Gaussian noise to add to observations.')
+
+    # -------------------------------------------------------------------------
+    #  Representation probe evaluation parameters
+    # -------------------------------------------------------------------------
+    parser.add_argument('--probe_eval_interval', type=int, default=128,
+                        help='Run linear-probe evaluation every N global steps (0 disables probing).')
+    parser.add_argument('--probe_num_samples', type=int, default=1024,
+                        help='Number of random environment states sampled for each probe evaluation.')
+    parser.add_argument('--probe_train_steps', type=int, default=200,
+                        help='SGD steps to train each linear probe during evaluation.')
+    parser.add_argument('--probe_batch_size', type=int, default=128,
+                        help='Mini-batch size during probe training.')
 
     return parser.parse_args()
 
