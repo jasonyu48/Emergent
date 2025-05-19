@@ -825,9 +825,19 @@ def train_pldm(args):
                 # KL divergence between predicted and target probability distributions
                 eps = 1e-8
                 if args.mode == 'RL':
-                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
+                    if args.loss_type == 1: # L1 loss
+                        dynamics_loss = F.l1_loss(Z_next_pred, Z_next_actual.detach())
+                    elif args.loss_type == 2: # L2 loss
+                        dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual.detach())
+                    elif args.loss_type == 4: # L4 loss
+                        dynamics_loss = torch.mean((Z_next_pred - Z_next_actual.detach())**4)
                 else:
-                    dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual)  #grad flow from the world model
+                    if args.loss_type == 1:
+                        dynamics_loss = F.l1_loss(Z_next_pred, Z_next_actual)
+                    elif args.loss_type == 2:
+                        dynamics_loss = F.mse_loss(Z_next_pred, Z_next_actual)  #grad flow from the world model
+                    elif args.loss_type == 4:
+                        dynamics_loss = torch.mean((Z_next_pred - Z_next_actual)**4)
 
                 # ------------------------------------------------------------------
                 #  (UPDATED) Diagnostics: average L2-norm (vector magnitude) of latent tensors
@@ -1103,20 +1113,20 @@ def parse_args():
     parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm for action grid')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=999999, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=64, help='Logging frequency for gradient statistics')
     parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
     parser.add_argument('--use_value_loss', action='store_true', default=True, help='Train value head with MSE to returns')
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
-    parser.add_argument('--lambda_dynamics', type=float, default=1e4, help='Weight for dynamics loss')
+    parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
     parser.add_argument('--lambda_policy', type=float, default=1e-1, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-2, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
     parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be smaller than 0.1 otherwise the policy will be constant
 
-    parser.add_argument('--encoder_lr', type=float, default=1e-6, help='Learning rate for encoder')
+    parser.add_argument('--encoder_lr', type=float, default=1e-5, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
     parser.add_argument('--policy_lr', type=float, default=1e-4, help='Learning rate for policy') # can't be too large otherwise the policy will be constant
     parser.add_argument('--value_lr', type=float, default=1e-4, help='Learning rate for value')
@@ -1132,9 +1142,10 @@ def parse_args():
     # Other parameters
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', 
                         help='Device to run training on')
-    parser.add_argument('--output_dir', type=str, default='output_JEPA_1e4jepa_noisy', help='Directory to save model and logs') # Updated default
+    parser.add_argument('--output_dir', type=str, default='output_JEPA_l4loss', help='Directory to save model and logs') # Updated default
     parser.add_argument('--resume', action='store_false', default=False, help='Resume training from checkpoint')
     parser.add_argument('--mode', type=str, default='JEPA', choices=['RL','JEPA'], help='block the grad flow from JEPA if mode is RL')
+    parser.add_argument('--loss_type', type=int, default=4, choices=[1,2,4], help='Use L_n loss for dynamics loss')
 
     # Add a new argument to choose between immediate rewards and discounted returns
     parser.add_argument('--use_immediate_reward', action='store_true', default=False, help='Use immediate reward for advantage calculation and value network training')
