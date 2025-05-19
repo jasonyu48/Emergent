@@ -1113,7 +1113,7 @@ def parse_args():
     parser.add_argument('--max_step_norm', type=float, default=12, help='Maximum step norm for action grid')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for episode collection')
     parser.add_argument('--use_gpu_inference', action='store_true', default=True, help='Use GPU for inference during rollout')
-    parser.add_argument('--log_steps', type=int, default=64, help='Logging frequency for gradient statistics')
+    parser.add_argument('--log_steps', type=int, default=99999, help='Logging frequency for gradient statistics')
     parser.add_argument('--heatmap', action='store_false', default=False, help='Save a heatmap of Z_t')
     parser.add_argument('--use_same_page_loss', action='store_false', default=False, help='Use on-the-same-page loss between next goal and dynamics')
     parser.add_argument('--use_decoder_loss', action='store_false', default=False, help='Enable decoder reconstruction warm-up loss')
@@ -1121,10 +1121,10 @@ def parse_args():
     parser.add_argument('--normalize_returns_and_advantage', action='store_true', default=True, help='Normalize returns and advantage to zero-mean, unit-std')
     
     parser.add_argument('--lambda_dynamics', type=float, default=1e0, help='Weight for dynamics loss')
-    parser.add_argument('--lambda_policy', type=float, default=1e-1, help='Weight for policy loss')
+    parser.add_argument('--lambda_policy', type=float, default=0.1, help='Weight for policy loss')
     parser.add_argument('--lambda_value', type=float, default=5e-2, help='Weight for value loss')
     parser.add_argument('--lambda_same_page', type=float, default=0.0, help='Weight for on-the-same-page loss')
-    parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be smaller than 0.1 otherwise the policy will be constant
+    parser.add_argument('--lambda_entropy', type=float, default=0.1, help='Weight for policy entropy bonus') # can't be smaller than lambda_policy otherwise the policy will be constant
 
     parser.add_argument('--encoder_lr', type=float, default=1e-5, help='Learning rate for encoder')
     parser.add_argument('--dynamics_lr', type=float, default=5e-4, help='Learning rate for dynamics model')
